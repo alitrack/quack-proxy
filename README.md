@@ -26,6 +26,21 @@ quack-proxy does all of this with a single YAML and a single binary.
 
 ## Quick Start
 
+### One-Click (No Go install needed)
+
+```bash
+# Works without installing quack-proxy — uses DuckDB + Quack directly
+curl -fsSL https://raw.githubusercontent.com/alitrack/quack-proxy/main/scripts/quack-start.sh | bash -s -- ./my-data mytoken 9491
+```
+
+This starts a Quack server on port 9491 with token `mytoken`. Connect immediately:
+
+```sql
+LOAD quack;
+CREATE SECRET (TYPE QUACK, TOKEN 'mytoken');
+ATTACH 'quack:localhost:9491' AS remote;
+```
+
 ### Install
 
 ```bash
@@ -47,10 +62,10 @@ listener:
 
 shards:
   - name: analytics
-    database: /data/analytics.db
+    database: ./data/analytics.db
 
   - name: logs
-    database: /data/logs.db
+    database: ./data/logs.db
 ```
 
 ### Run
@@ -74,8 +89,22 @@ quack-proxy stop
 
 ### Connect
 
+quack-proxy auto-generates an auth token for each shard. Get your tokens and connect:
+
+```bash
+# Show tokens for all shards
+quack-proxy status --json | jq -r '.shards[] | "\(.name): token=\(.token) port=\(.port)"'
+```
+
+Then connect from DuckDB:
+
 ```sql
--- From any DuckDB instance:
+LOAD quack;
+
+-- Register the token as a DuckDB secret (REQUIRED before ATTACH)
+CREATE SECRET (TYPE QUACK, TOKEN 'your-token-here');
+
+-- Now ATTACH each shard
 ATTACH 'quack:localhost:9491' AS analytics;
 ATTACH 'quack:localhost:9492' AS logs;
 
@@ -85,11 +114,7 @@ FROM analytics.events a
 JOIN logs.errors l ON a.date = l.date;
 ```
 
-Or get the ATTACH SQL automatically:
-
-```bash
-quack-proxy status --json | jq -r .coordinator_attach_sql
-```
+> **⚠️ ATTACH without CREATE SECRET will fail with "Could not find a Quack authentication token".**
 
 ---
 
@@ -193,6 +218,54 @@ IMPORT FOREIGN SCHEMA "remote" FROM SERVER quack_cluster INTO public;
 See [PRD.md](docs/PRD.md) §6 for more integration patterns.
 
 ---
+
+## Troubleshooting
+
+### "Could not find a Quack authentication token"
+
+This means you tried `ATTACH` without registering the token first. **Always run CREATE SECRET first:**
+
+```sql
+LOAD quack;
+CREATE SECRET (TYPE QUACK, TOKEN 'your-token');
+ATTACH 'quack:localhost:9491' AS remote;
+```
+
+Get your token from `quack-proxy status --json` or the `.token` file created by `quack-start.sh`.
+
+### "shard unhealthy, restarting"
+
+Usually caused by:
+
+1. **Database path doesn't exist or no write permission** — ensure the parent directory exists:
+   ```bash
+   mkdir -p ./data
+   ```
+
+2. **DuckDB not installed or too old** — requires DuckDB ≥ 1.5.2:
+   ```bash
+   duckdb --version
+   ```
+
+3. **Quack extension not available** — install it:
+   ```sql
+   INSTALL quack; LOAD quack;
+   ```
+
+### ATTACH fails with connection error
+
+If connecting from a different machine, the config must use `bind_host: 0.0.0.0` (not localhost):
+
+```yaml
+listener:
+  bind_host: 0.0.0.0
+```
+
+And the server must be started with `allow_other_hostname := true`:
+
+```sql
+CALL quack_serve('quack:0.0.0.0:9491', token := 'mypass', allow_other_hostname := true);
+```
 
 ## Non-Goals
 
