@@ -83,7 +83,7 @@ func (s *Supervisor) startShardLocked(ctx context.Context, cfg config.ShardConfi
 	cmd := exec.Command("bash", "-c", shellCmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = setProcessGroup()
 	cmd.Cancel = nil // disable CommandContext's internal context kill goroutine
 
 	if err := cmd.Start(); err != nil {

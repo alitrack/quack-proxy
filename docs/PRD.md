@@ -252,7 +252,7 @@ OPTIONS (quack_token 'token_from_status_json');
 | 故障恢复 | 崩溃自动重启，指数退避（1s→2s→4s→…→30s max） |
 | 内存占用 | <50MB（不含 DuckDB 子进程） |
 | 二进制大小 | <15MB（Go 静态编译） |
-| 平台 | Linux (primary), macOS (dev) |
+|| 平台 | Linux + macOS + Windows |
 | DuckDB 版本 | >= 1.5.2（Quack 可用版本） |
 | 并发 shard 数 | 1-1000 |
 
@@ -307,7 +307,7 @@ OPTIONS (quack_token 'token_from_status_json');
 | HTTP 客户端 | net/http | 健康检查够用 |
 | 日志 | slog | Go 1.21+ 标准库 |
 | CLI 框架 | 无（flag + 手写） | 命令少，不值得引入 cobra |
-| 跨平台 | Linux + macOS | Windows 不支持 Quack |
+| 跨平台 | Linux + macOS + Windows | Quack 扩展三平台全支持 |
 
 ---
 
