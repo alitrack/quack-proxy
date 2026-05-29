@@ -190,6 +190,14 @@ func (s *Supervisor) Status() []ShardProcess {
 	return result
 }
 
+// ManualSetShard is a test helper to inject shard state without starting a real DuckDB process.
+func (s *Supervisor) ManualSetShard(name string, sp ShardProcess) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	spCopy := sp
+	s.shards[name] = &spCopy
+}
+
 func (s *Supervisor) AttachSQL() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

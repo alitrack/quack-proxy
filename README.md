@@ -3,6 +3,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![DuckDB](https://img.shields.io/badge/DuckDB-%E2%89%A51.5.2-FFF000?style=flat&logo=duckdb)](https://duckdb.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Built by Hermes](https://img.shields.io/badge/built%20by-Hermes%20Agent-8A2BE2)](https://hermes-agent.nousresearch.com)
 
 > One YAML, one command. Turn any set of DuckDB database files into a highly-available Quack service cluster.
 
