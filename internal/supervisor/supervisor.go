@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -16,11 +16,33 @@ import (
 	"github.com/alitrack/quack-proxy/internal/health"
 )
 
-const quackBootSQL = `
-INSTALL quack FROM core_nightly;
-LOAD quack;
-CALL quack_serve('quack:%s:%d', token = '%s', allow_other_hostname = true);
+const quackBootSQL = `LOAD quack;
+%s
+CALL quack_serve('quack:%s:%d', token = '%s', allow_other_hostname = true, disable_ssl = true);
 `
+
+// buildBootSQL assembles the SQL fed to a shard's DuckDB process:
+// LOAD quack first, then the shard's init_sql (extensions/hooks), then
+// quack_serve. init_sql MUST run after LOAD quack: the quack_* settings
+// (e.g. quack_authentication_function) only exist once the extension is
+// loaded — setting them earlier is silently dropped.
+func buildBootSQL(bindHost string, cfg config.ShardConfig, token string) string {
+	init := cfg.InitSQL
+	if cfg.InitSQLFile != "" {
+		if data, err := os.ReadFile(cfg.InitSQLFile); err == nil {
+			if init != "" {
+				init += "\n"
+			}
+			init += string(data)
+		}
+		// A missing init_sql_file is surfaced by the duckdb error output;
+		// failing the build here would hide it behind a restart loop.
+	}
+	if init == "" {
+		init = ""
+	}
+	return fmt.Sprintf(quackBootSQL, init, bindHost, cfg.Port, token)
+}
 
 type Supervisor struct {
 	cfg    *config.Config
@@ -70,13 +92,22 @@ func (s *Supervisor) startShardLocked(ctx context.Context, cfg config.ShardConfi
 		token = randomToken(32)
 	}
 
-	sql := fmt.Sprintf(quackBootSQL, s.cfg.Listener.BindHost, cfg.Port, token)
+	sql := buildBootSQL(s.cfg.Listener.BindHost, cfg, token)
 
-	// Use shell pipe trick: pipe init SQL then keep stdin open via
-	// tail -f /dev/null so duckdb stays alive serving Quack indefinitely.
+	// Feed boot SQL via a FIFO-safe pipeline: write the SQL to a temp file,
+	// then `(cat file; tail -f /dev/null) | duckdb ...`. File contents pass
+	// through VERBATIM — no shell quoting, so multi-line init_sql (Lua
+	// policies with comments, dollar-quoted sources) survives intact.
+	// (An earlier `(echo '...'; tail)` variant collapsed every newline,
+	// turning Lua `--` comments into "comment out the whole program".)
+	sqlFile := filepath.Join(os.TempDir(), fmt.Sprintf("quack-proxy-%s-%d.sql", cfg.Name, cfg.Port))
+	if err := os.WriteFile(sqlFile, []byte(sql), 0600); err != nil {
+		return fmt.Errorf("write boot sql: %w", err)
+	}
 	shellCmd := fmt.Sprintf(
-		`(echo '%s'; tail -f /dev/null) | duckdb '%s'`,
-		strings.ReplaceAll(sql, "'", "'\\''"),
+		`(cat '%s'; tail -f /dev/null) | '%s' -unsigned '%s'`,
+		sqlFile,
+		s.cfg.Global.DuckDBBin,
 		cfg.Database,
 	)
 

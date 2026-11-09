@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,28 @@ func TestStartShardLocked(t *testing.T) {
 
 	// Cleanup
 	sup.StopAll()
+}
+
+// TestBuildBootSQLInitSQL verifies that init_sql is prepended to the boot SQL
+// (extensions/hooks load BEFORE quack_serve) and absent when not configured.
+func TestBuildBootSQLInitSQL(t *testing.T) {
+	cfg := config.ShardConfig{Name: "s", Database: "/x.db", Port: 9599,
+		InitSQL: "INSTALL luajit FROM community; LOAD luajit;"}
+	got := buildBootSQL("0.0.0.0", cfg, "tk")
+	initIdx := strings.Index(got, "INSTALL luajit")
+	serveIdx := strings.Index(got, "quack_serve")
+	if initIdx == -1 || serveIdx == -1 || initIdx > serveIdx {
+		t.Errorf("init_sql must precede quack_serve (init=%d serve=%d):\n%s", initIdx, serveIdx, got)
+	}
+
+	plain := config.ShardConfig{Name: "s", Database: "/x.db", Port: 9600}
+	got2 := buildBootSQL("127.0.0.1", plain, "tk2")
+	if strings.Contains(got2, "luajit") {
+		t.Errorf("no init_sql configured but found injected SQL:\n%s", got2)
+	}
+	if !strings.Contains(got2, "quack_serve('quack:127.0.0.1:9600'") {
+		t.Errorf("boot stanza malformed:\n%s", got2)
+	}
 }
 
 func TestStatus(t *testing.T) {

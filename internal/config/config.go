@@ -20,6 +20,11 @@ type GlobalConfig struct {
 	LogLevel   string `yaml:"log_level"`
 	PIDFile    string `yaml:"pid_file"`
 	StatusFile string `yaml:"status_file"`
+	// DuckDBBin overrides the duckdb CLI binary used for shards.
+	// Pin a known-good version: some alphas have broken quack token auth
+	// (verified 2026-11-09: v2.0.0-alpha39998 rejects even the correct
+	// server token; 2.0.0-alpha48730 works).
+	DuckDBBin string `yaml:"duckdb_bin"`
 }
 
 type ListenerConfig struct {
@@ -35,6 +40,22 @@ type ShardConfig struct {
 	Port     int    `yaml:"port"`
 	Token    string `yaml:"token"`
 	ReadOnly bool   `yaml:"readonly"`
+	// InitSQL runs BEFORE quack_serve in the shard's DuckDB process.
+	// Use it to install/load extra extensions and register server-side
+	// hooks, e.g. the luajit RBAC policy engine:
+	//
+	//   init_sql: |
+	//     INSTALL luajit FROM community; LOAD luajit;
+	//     SET GLOBAL quack_authentication_function = 'rbac_authn';
+	//
+	// NOTE: init_sql is piped through a shell echo, so keep it to
+	// single-line statements. For multi-line payloads (e.g. a Lua policy
+	// source with comments), put the SQL in a file and use init_sql_file.
+	InitSQL string `yaml:"init_sql"`
+	// InitSQLFile is a path to a .sql file whose contents are used as
+	// init_sql (file contents are piped verbatim; init_sql, when both are
+	// set, runs first).
+	InitSQLFile string `yaml:"init_sql_file"`
 }
 
 type ProxyConfig struct {
@@ -72,6 +93,9 @@ func Load(path string) (*Config, error) {
 func (c *Config) applyDefaults() {
 	if c.Global.LogLevel == "" {
 		c.Global.LogLevel = "info"
+	}
+	if c.Global.DuckDBBin == "" {
+		c.Global.DuckDBBin = "duckdb"
 	}
 	if c.Global.PIDFile == "" {
 		c.Global.PIDFile = "/var/run/quack-proxy/quack-proxy.pid"

@@ -194,9 +194,61 @@ See [`quack-proxy.example.yaml`](quack-proxy.example.yaml) for a fully annotated
 | `shards[].port` | int | auto | Override auto-assigned port |
 | `shards[].token` | string | auto-generated | Quack auth token |
 | `shards[].readonly` | bool | `false` | Read-only mode |
+| `global.duckdb_bin` | string | `duckdb` | DuckDB host binary/script. Can be a wrapper (e.g. a python-hosted engine) — invoked as `<duckdb_bin> -unsigned <db>` with boot SQL on stdin. Pin a known-good version: alpha CLI builds have served broken token auth (see repo wiki). |
+| `shards[].init_sql` | string | — | SQL injected at shard boot, after `LOAD quack` and before `quack_serve`. Use for RBAC hooks, extensions, seed setup. Multi-statement; dollar-quoted bodies supported. |
+| `shards[].init_sql_file` | string | — | Path variant of `init_sql` (mutually exclusive; file wins if both set). |
 | `proxy.enabled` | bool | `false` | Enable HAProxy config gen |
 | `proxy.output` | string | — | HAProxy config output path |
 | `proxy.bind_port` | int | — | HAProxy frontend port |
+
+---
+
+## Per-shard RBAC via `init_sql`
+
+`init_sql` runs inside each shard at boot — before the server accepts
+connections. A common use is compiling a Lua policy
+([duckdb-luajit](https://github.com/alitrack/duckdb-luajit)) and wiring quack's
+authn/authz hooks:
+
+```yaml
+shards:
+  - name: sales
+    database: /data/sales.duckdb
+    port: 19601
+    token: server-side-token
+    init_sql_file: /etc/quack-proxy/rbac-init.sql
+```
+
+`rbac-init.sql` shape (full example in `examples/`):
+
+```sql
+INSTALL luajit FROM community;
+LOAD luajit;
+SELECT * FROM luajit_module(mode := 'compile', sql_name := 'rbac', source := $rbac$
+-- ...policy functions authn(p)/authz(p)...
+return function(p)
+  if p.op == 'authn' then return authn(p) end
+  if p.op == 'authz' then return authz(p) end
+end
+$rbac$);
+CREATE MACRO rbac_authn(sid, ct, st) AS (luajit_s('rbac', {op:'authn', sid:sid, client_token:ct, server_token:st})::BOOLEAN);
+CREATE MACRO rbac_authz(sid, query) AS (luajit_s('rbac', {op:'authz', sid:sid, q:query})::BOOLEAN);
+SET GLOBAL quack_authentication_function = 'rbac_authn';
+SET GLOBAL quack_authorization_function = 'rbac_authz';
+```
+
+Verified rules (2026-11-09, DuckDB 2.0.0 stable engine):
+
+- The two `SET GLOBAL` lines MUST come **after** `LOAD quack` (settings only
+  exist once the extension is loaded) and **before** `quack_serve`.
+- `0.0.0.0` binds speak plain HTTP to LAN clients — `disable_ssl := true` is
+  added automatically by quack-proxy.
+- Inside authn/authz, never re-enter DuckDB (`_duckdb_query`) during the
+  handshake — it deadlocks the shard. Keep policy state in Lua memory.
+- `quack_authorization_function` returns the SQL to actually execute when the
+  macro is not cast to BOOLEAN (a rewrite hook, not just a gate).
+- Lua policy bodies must be valid Lua — an early compile failure makes every
+  token fail with `Authentication failed`.
 
 ---
 
