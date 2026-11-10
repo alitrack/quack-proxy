@@ -1,0 +1,54 @@
+# CI for quack-proxy: build, vet, gofmt, and the full Go test suite, plus
+# the Python statement-splitter unit tests. The suite is hermetic (no DuckDB
+# or network needed): lifecycle tests use stub duckdb_bin executables.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  go:
+    name: go (ubuntu, go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25", "1.26"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l . >&2; exit 1; }
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build (linux)
+        run: go build ./...
+
+      - name: build (windows cross-compile)
+        run: GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/
+
+      - name: test
+        run: go test ./... -count=1
+
+  python:
+    name: splitter tests (python ${{ matrix.py }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        py: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.py }}
+      - name: run splitter tests (no duckdb needed)
+        run: python3 examples/duckdb_serve_host_test.py

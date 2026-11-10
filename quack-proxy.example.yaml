@@ -1,18 +1,61 @@
-# quack-proxy.yaml — example configuration
+# quack-proxy.yaml — example configuration.
+#
+# Copy to quack-proxy.yaml and run:  quack-proxy start -c quack-proxy.yaml
+#
+# Every key is shown below with its default in a trailing comment. Values that
+# are *required* are marked. The file is validated before any process starts:
+# unknown keys are ignored, but structural/quote violations fail loud.
 
 global:
-  log_level: info
-  pid_file: /tmp/quack-proxy/quack-proxy.pid
-  status_file: /tmp/quack-proxy/status.json
+  log_level: info           # info (default) | debug | warn | error
+  pid_file: /var/run/quack-proxy/quack-proxy.pid   # where the daemon writes its pid
+  status_file: /var/run/quack-proxy/status.json    # live cluster state (shards, ports, tokens)
+  # duckdb_bin: duckdb      # engine used to host each shard; default "duckdb".
+                            # May be a wrapper script (see examples/duckdb-python-host.sh).
+                            # Must be an executable on PATH (or an absolute path);
+                            # must not contain a single quote or newline.
 
 listener:
-  bind_host: 0.0.0.0
-  port_start: 9491
-  health_interval: 5s
+  bind_host: 0.0.0.0        # Quack listen address. 0.0.0.0 for LAN access;
+                            # 127.0.0.1 to keep it local-only.
+  port_start: 9491          # first auto-assigned port (shards increment from here)
+  health_path: /            # HTTP path the health check GETs (Quack root returns the RPC greeting)
+  health_interval: 5s       # how often each shard is health-checked
 
 shards:
+  # name:    logical name; must be unique and quote-free (it becomes an
+  #          ATTACH alias and a process-group label).
+  # database: path to the .duckdb file; must exist and be quote-free.
+  # port:    optional; auto-assigned from port_start if omitted.
+  # token:   optional; a 32-char crypto-random token is generated and stored
+  #          in status_file if omitted. Must be quote-free if provided.
+  # readonly, init_sql, init_sql_file: see below.
   - name: analytics
     database: /tmp/quack-proxy/analytics.db
+    # port: 9491            # leave unset to auto-assign (9491, 9492, ...)
 
   - name: logs
     database: /tmp/quack-proxy/logs.db
+    # port: 9492
+
+  # Per-shard boot SQL: runs AFTER `LOAD quack` and BEFORE `quack_serve`
+  # inside that shard's engine. Use it to install/load extensions and register
+  # server-side authn/authz hooks (e.g. the luajit RBAC policy in examples/).
+  # Delivered verbatim, so multi-line / dollar-quoted bodies are safe.
+  #
+  # init_sql: |
+  #   LOAD luajit;
+  #   SET GLOBAL quack_authentication_function = 'rbac_authn';
+  #   SET GLOBAL quack_authorization_function = 'rbac_authz';
+  #
+  # Or reference a file instead (the file must exist; a missing path fails
+  # shard startup loudly):
+  # init_sql_file: /etc/quack-proxy/rbac-init.sql
+
+# Optional load-balancer config generation (used by `quack-proxy gen-proxy`).
+# Uncomment to have quack-proxy emit an HAProxy config for the frontend.
+# proxy:
+#   enabled: true
+#   output: /etc/haproxy/quack-proxy.cfg   # required for gen-proxy
+#   bind_port: 9490                        # frontend port; required
+#   mode: roundrobin                       # roundrobin (default) | leastconn

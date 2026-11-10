@@ -3,7 +3,8 @@
 set -e
 
 DATA_DIR="${1:-./quack-data}"
-TOKEN="${2:-quack_$(date +%s)}"
+# urandom-derived default token (a date-stamped one is guessable); $2 overrides.
+TOKEN="${2:-quack_$(od -x /dev/urandom | head -1 | awk '{print $2$3$4$5}')}"
 PORT="${3:-9491}"
 DB="${DATA_DIR}/default.db"
 
@@ -15,8 +16,8 @@ echo "   端口:   $PORT"
 echo "   Token:  $TOKEN"
 echo ""
 
-# 清理旧进程
-pkill -f "duckdb.*quack\|duckdb.*$PORT" 2>/dev/null || true
+# 清理旧进程（按数据库路径匹配；旧版用 "\|" 的写法是字面量，实际杀不到任何进程）
+pkill -f "duckdb .*${DB}" 2>/dev/null || true
 sleep 1
 
 # 启动 DuckDB + Quack（保持进程存活）
@@ -43,5 +44,6 @@ echo "  \""
 echo ""
 echo "🛑 停止: pkill -f 'duckdb.*$DB'"
 echo "📁 Token 已保存: $DATA_DIR/.token"
+umask 077
 echo "$TOKEN" > "$DATA_DIR/.token"
 echo "$(ps aux | grep "duckdb.*$DB" | grep -v grep | awk '{print $2}')" > "$DATA_DIR/.pid"

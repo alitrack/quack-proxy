@@ -80,9 +80,9 @@ quack-proxy (Go 二进制)
 
 ```
 quack-proxy (主进程, PID 1)
-    ├── signal handler (SIGTERM, SIGHUP)
-    ├── config watcher (inotify on config file)
-    ├── health check loop (每 N 秒轮询所有端点)
+    ├── signal handler (SIGTERM, SIGHUP → 增量 reload)
+    ├── status file 写入 (每个健康检查周期写 status.json)
+    ├── health check loop (每 N 秒轮询, 指数退避重启, 10 次失败后停泊)
     │
     └── child processes (每个 DuckDB 实例一个 goroutine)
         ├── duckdb -- Quack on :9491 ← /data/shard_1.db
@@ -94,22 +94,24 @@ quack-proxy (主进程, PID 1)
 
 ```
 START:
-  1. 解析 YAML 配置
+  1. 解析 YAML 配置（含 log_level / init_sql_file 存在性等校验）
   2. 验证所有 .duckdb 文件存在
-  3. 为每个 shard 启动 duckdb 子进程
-     - 生成随机 token（如果未指定）
-     - duckdb -c "INSTALL quack; LOAD quack; CALL quack_serve('quack:0.0.0.0:PORT', token='TOKEN');"
-  4. 等待所有进程就绪（HTTP health check 通过）
-  5. 进入运行循环
+  3. 为每个 shard 启动 duckdb 子进程（各自独立进程组）
+     - 生成 crypto-random token（如果未指定）
+     - boot SQL 写入临时文件，经 (cat file; tail -f /dev/null) 管道逐字送入
+       <duckdb_bin> -unsigned <db> 的 stdin（避免 shell 引号破坏多行 init_sql）
+  4. 等待所有进程就绪（HTTP health check 通过，15s 宽限期）
+  5. 写 status.json，进入运行循环
 
 RUNNING:
   1. 每 N（可配置）秒 HTTP GET 所有端点
-  2. 不健康的端点：kill 子进程 → 重启 → 指数退避
-  3. 写状态文件 /var/run/quack-proxy/status.json
+  2. 不健康的端点：kill 整个进程组 → 重启 → 指数退避（1s→30s）
+     连续失败 10 次后停泊该 shard（status=stopped），不再无限重启
+  3. 每个周期刷新 status.json（含 token / 重启计数 / 健康状态）
 
 STOP:
-  1. SIGTERM → 所有子进程 → 等待 graceful shutdown
-  2. SIGKILL 超时 timer（默认 10s）
+  1. SIGTERM → 每个 shard 的进程组（而非单个 bash 包装进程）
+  2. 10s 未退出则对进程组 SIGKILL；随后清理 pid / status 文件
 
 RELOAD:
   1. SIGHUP → 重新解析配置 → 增量更新子进程
@@ -142,8 +144,7 @@ shards:
   - name: orders_2024           # 逻辑名称
     database: /data/orders_2024.db
     port: 9491                  # 可选，自动分配
-    token: ""                   # 可选，空则自动生成
-    readonly: false             # 可选
+    token: ""                   # 可选，空则自动生成（crypto-random，32 字符）
 
   - name: orders_2025
     database: /data/orders_2025.db
@@ -165,7 +166,7 @@ proxy:
 
 ### 4.2 Token 安全模型
 
-- 未指定 token → 启动时自动生成 32 字符随机 token，写入 `status.json`
+- 未指定 token → 启动时用 `crypto/rand` 生成 32 字符密码学安全 token，写入 `status.json`
 - 指定 token → 使用指定值
 - 生产环境建议：Nginx 反向代理做 SSL termination + 固定 token
 
@@ -252,7 +253,7 @@ OPTIONS (quack_token 'token_from_status_json');
 | 故障恢复 | 崩溃自动重启，指数退避（1s→2s→4s→…→30s max） |
 | 内存占用 | <50MB（不含 DuckDB 子进程） |
 | 二进制大小 | <15MB（Go 静态编译） |
-|| 平台 | Linux + macOS + Windows |
+| 平台 | Linux + macOS（Windows 为 v0.1 non-goal，见 §8） |
 | DuckDB 版本 | >= 1.5.2（Quack 可用版本） |
 | 并发 shard 数 | 1-1000 |
 
@@ -268,6 +269,7 @@ OPTIONS (quack_token 'token_from_status_json');
 | Quack 协议实现 | 用 DuckDB 自身的 Quack 客户端（ATTACH 模式） |
 | 跨机器 Quack 端点发现 | v0.1 专注单机多文件管理 |
 | 持久化 Coordinator | v0.1 的 Coordinator 是无状态的，用户自己启动 DuckDB + ATTACH |
+| Windows 支持 | supervisor 依赖 bash 进程组（`Setpgid`），v0.1 专注 Linux/macOS |
 
 ---
 

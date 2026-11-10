@@ -21,16 +21,22 @@ luajit_module(...) source passes through verbatim.
 import sys
 import time
 
-import duckdb
-
 
 def _scan(text, yield_tail):
-    """State-machine scan. Returns (statements, incomplete_tail)."""
+    """State-machine scan. Returns (statements, incomplete_tail).
+
+    Tracks the DuckDB lexer's rules (verified against duckdb 2.0.0,
+    2026-11-10): '$' + any alnum run (including the empty tag '$$') opens a
+    dollar-quote; block comments NEST (depth counted, '/*' inside a comment
+    increments); a ';' ends a statement only outside quotes, dollar-quotes
+    and comments.
+    """
     stmts = []
     buf = []
     dollar_tag = None
     in_squote = in_dquote = False
-    in_line_comment = in_block_comment = False
+    in_line_comment = False
+    block_depth = 0
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
@@ -41,11 +47,16 @@ def _scan(text, yield_tail):
                 in_line_comment = False
             i += 1
             continue
-        if in_block_comment:
+        if block_depth > 0:
             buf.append(ch)
+            if ch == "/" and nxt == "*":  # nested open
+                buf.append(nxt)
+                block_depth += 1
+                i += 2
+                continue
             if ch == "*" and nxt == "/":
                 buf.append(nxt)
-                in_block_comment = False
+                block_depth -= 1
                 i += 2
                 continue
             i += 1
@@ -57,7 +68,7 @@ def _scan(text, yield_tail):
                 i += 1
                 continue
             if ch == "/" and nxt == "*":
-                in_block_comment = True
+                block_depth = 1
                 buf.append(ch)
                 i += 1
                 continue
@@ -69,7 +80,8 @@ def _scan(text, yield_tail):
                 j = i + 1
                 while j < n and (text[j].isalnum() or text[j] == "_"):
                     j += 1
-                if j < n and text[j] == "$" and j > i + 1:
+                # j == i + 1 covers the empty tag $$
+                if j < n and text[j] == "$" and j >= i + 1:
                     dollar_tag = text[i : j + 1]
                     buf.append(dollar_tag)
                     i = j + 1
@@ -97,7 +109,7 @@ def _scan(text, yield_tail):
             and not in_squote
             and not in_dquote
             and not in_line_comment
-            and not in_block_comment
+            and block_depth == 0
         ):
             stmt = "".join(buf).strip()
             if stmt:
@@ -117,6 +129,8 @@ def split_statements(text):
 
 
 def main() -> None:
+    import duckdb  # lazy: the splitter above is testable without the engine
+
     args = [a for a in sys.argv[1:] if a != "-unsigned"]
     db = args[0] if args else ":memory:"
     con = duckdb.connect(db)

@@ -1,6 +1,6 @@
 # quack-proxy
 
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![DuckDB](https://img.shields.io/badge/DuckDB-%E2%89%A51.5.2-FFF000?style=flat&logo=duckdb)](https://duckdb.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built by Hermes](https://img.shields.io/badge/built%20by-Hermes%20Agent-8A2BE2)](https://hermes-agent.nousresearch.com)
@@ -127,8 +127,10 @@ quack-proxy (Go daemon, ~10MB RSS)
 │   ├── duckdb logs.db      → Quack :9492
 │   └── duckdb users.db     → Quack :9493
 ├── Health Check Loop (every 5s)
-│   └── HTTP GET / → unhealthy? kill → restart
-├── Signal Handler (SIGHUP reload, SIGTERM shutdown)
+│   └── HTTP GET / → unhealthy? kill whole process group → restart
+│       (exponential backoff 1s→30s; parks a shard after 10 failed tries)
+├── Status File (status.json — live shards, ports, tokens, uptime)
+├── Signal Handler (SIGHUP incremental reload, SIGTERM shutdown)
 ├── HAProxy Config Generator
 └── Optional: Coordinator DuckDB
     └── ATTACH all healthy endpoints
@@ -136,9 +138,11 @@ quack-proxy (Go daemon, ~10MB RSS)
 
 Each DuckDB process gets:
 - Automatic Quack extension install + load
-- Random 32-char auth token (or user-specified)
+- A cryptographically random 32-char auth token (or user-specified)
 - `allow_other_hostname=true` for remote connections
-- Graceful shutdown via SIGTERM (10s timeout → SIGKILL)
+- Its own process group, so a stop takes the whole tree (wrapper + engine +
+  keep-alive) with it — no orphaned listener, no leaked FDs
+- Graceful shutdown via SIGTERM to the group (10s timeout → SIGKILL)
 
 ---
 
@@ -169,10 +173,10 @@ See [docs/benchmark.md](docs/benchmark.md) for full methodology and raw data.
 | Command | Description |
 |---------|-------------|
 | `start [-c config.yaml]` | Start daemon with all shards |
-| `stop` | Graceful shutdown (SIGTERM → children → wait) |
-| `status [--json]` | Show shard health, uptime, restarts |
-| `reload` | SIGHUP → re-parse config → incremental update |
-| `gen-proxy [-c config.yaml]` | Generate HAProxy/nginx config |
+| `stop` | Graceful shutdown: SIGTERM to every shard's process group (SIGKILL after 10s) |
+| `status [--json]` | Show shard health, uptime, restarts, and tokens (read from the live status file) |
+| `reload` | SIGHUP → re-parse config → incremental update (start added shards, stop removed ones) |
+| `gen-proxy [-c config.yaml]` | Generate HAProxy config from the configured shards (works with no daemon running) |
 | `version` | Print version |
 
 ---
@@ -185,21 +189,22 @@ See [`quack-proxy.example.yaml`](quack-proxy.example.yaml) for a fully annotated
 |-----|------|---------|-------------|
 | `global.log_level` | string | `info` | debug, info, warn, error |
 | `global.pid_file` | string | `/var/run/quack-proxy/quack-proxy.pid` | PID file path |
+| `global.status_file` | string | `/var/run/quack-proxy/status.json` | Live cluster state (shards, ports, tokens, restarts) written every health-check cycle; read by `status` and `gen-proxy` |
+| `global.duckdb_bin` | string | `duckdb` | DuckDB host binary/script. Can be a wrapper (e.g. a python-hosted engine) — invoked as `<duckdb_bin> -unsigned <db>` with boot SQL on stdin. Pin a known-good version: alpha CLI builds have served broken token auth (see repo wiki). |
 | `listener.bind_host` | string | `0.0.0.0` | Quack listen address |
 | `listener.port_start` | int | `9491` | First port (auto-increments) |
 | `listener.health_path` | string | `/` | Health check HTTP path |
-| `listener.health_interval` | duration | `5s` | Health check interval |
-| `shards[].name` | string | *required* | Logical shard name |
-| `shards[].database` | string | *required* | Path to `.duckdb` file |
+| `listener.health_interval` | duration | `5s` | Health check interval (picked up on reload) |
+| `shards[].name` | string | *required* | Logical shard name (unique) |
+| `shards[].database` | string | *required* | Path to `.duckdb` file (must exist) |
 | `shards[].port` | int | auto | Override auto-assigned port |
-| `shards[].token` | string | auto-generated | Quack auth token |
-| `shards[].readonly` | bool | `false` | Read-only mode |
-| `global.duckdb_bin` | string | `duckdb` | DuckDB host binary/script. Can be a wrapper (e.g. a python-hosted engine) — invoked as `<duckdb_bin> -unsigned <db>` with boot SQL on stdin. Pin a known-good version: alpha CLI builds have served broken token auth (see repo wiki). |
-| `shards[].init_sql` | string | — | SQL injected at shard boot, after `LOAD quack` and before `quack_serve`. Use for RBAC hooks, extensions, seed setup. Multi-statement; dollar-quoted bodies supported. |
-| `shards[].init_sql_file` | string | — | Path variant of `init_sql` (mutually exclusive; file wins if both set). |
+| `shards[].token` | string | auto-generated | Quack auth token (crypto-random when unset) |
+| `shards[].init_sql` | string | — | SQL injected at shard boot, after `LOAD quack` and before `quack_serve`. Use for RBAC hooks, extensions, seed setup. Delivered verbatim — multi-statement and dollar-quoted bodies are safe. |
+| `shards[].init_sql_file` | string | — | Path to a `.sql` file appended after `init_sql`. The file must exist: a missing path fails shard startup loudly. |
 | `proxy.enabled` | bool | `false` | Enable HAProxy config gen |
 | `proxy.output` | string | — | HAProxy config output path |
-| `proxy.bind_port` | int | — | HAProxy frontend port |
+| `proxy.bind_port` | int | — | HAProxy frontend port (required for `gen-proxy`) |
+| `proxy.mode` | string | `roundrobin` | `roundrobin` or `leastconn` |
 
 ---
 
@@ -344,16 +349,25 @@ go build -o quack-proxy ./cmd/...
 ```
 
 Requirements:
-- Go 1.21+
+- Go 1.25+
 - DuckDB ≥ 1.5.2 (with Quack extension support)
+- Linux or macOS (the supervisor drives each shard through a `bash` process
+  group; a Windows port is a non-goal for v0.1)
 
 ### Testing
 
-This project started as a rapid prototype — the initial development cycle prioritized manual verification (`curl`, `ps`, direct stress testing) over unit tests. The core functionality was validated in production-like conditions before any test code was written.
+This project started as a rapid prototype — the initial development cycle
+prioritized manual verification (`curl`, `ps`, direct stress testing) over
+unit tests. The main bug found during that phase (signalling the bash wrapper
+orphaning the whole child tree) was caught by integration testing, not unit
+tests — a reminder that real process-management bugs need real subprocesses.
 
-The main bug discovered during development (`exec.CommandContext` killing child processes) was caught by manual integration testing, not unit tests — a reminder that mocking everything doesn't catch real process management bugs.
-
-Tests were added post-hoc and now cover all 5 packages (31 tests, `go test ./...` passes clean). The test suite focuses on what matters: config validation, health check logic, HAProxy output correctness, process lifecycle, and CLI argument parsing.
+The test suite now covers all five packages (31 tests, `go test ./...` passes
+clean). It exercises the parts that used to be wrong: whole-process-group
+teardown, restart backoff and retry parking, crypto token generation,
+config validation, health-check logic, HAProxy output correctness, and CLI
+pid-file handling. Lifecycle tests use a stub `duckdb_bin` (`true`/`cat`) so
+they stay fast and hermetic.
 
 ```bash
 go test ./... -v -count=1

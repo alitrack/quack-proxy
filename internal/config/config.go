@@ -10,10 +10,10 @@ import (
 )
 
 type Config struct {
-	Global   GlobalConfig    `yaml:"global"`
-	Listener ListenerConfig  `yaml:"listener"`
-	Shards   []ShardConfig   `yaml:"shards"`
-	Proxy    *ProxyConfig     `yaml:"proxy"`
+	Global   GlobalConfig   `yaml:"global"`
+	Listener ListenerConfig `yaml:"listener"`
+	Shards   []ShardConfig  `yaml:"shards"`
+	Proxy    *ProxyConfig   `yaml:"proxy"`
 }
 
 type GlobalConfig struct {
@@ -39,7 +39,6 @@ type ShardConfig struct {
 	Database string `yaml:"database"`
 	Port     int    `yaml:"port"`
 	Token    string `yaml:"token"`
-	ReadOnly bool   `yaml:"readonly"`
 	// InitSQL runs BEFORE quack_serve in the shard's DuckDB process.
 	// Use it to install/load extra extensions and register server-side
 	// hooks, e.g. the luajit RBAC policy engine:
@@ -48,22 +47,21 @@ type ShardConfig struct {
 	//     INSTALL luajit FROM community; LOAD luajit;
 	//     SET GLOBAL quack_authentication_function = 'rbac_authn';
 	//
-	// NOTE: init_sql is piped through a shell echo, so keep it to
-	// single-line statements. For multi-line payloads (e.g. a Lua policy
-	// source with comments), put the SQL in a file and use init_sql_file.
+	// The SQL is delivered to the child verbatim through a temp file, so
+	// multi-line bodies (Lua policies, dollar-quoted sources) are safe.
 	InitSQL string `yaml:"init_sql"`
-	// InitSQLFile is a path to a .sql file whose contents are used as
-	// init_sql (file contents are piped verbatim; init_sql, when both are
-	// set, runs first).
+	// InitSQLFile is a path to a .sql file whose contents are appended
+	// after init_sql (which runs first when both are set). The file must
+	// exist: a missing file fails shard startup loudly.
 	InitSQLFile string `yaml:"init_sql_file"`
 }
 
 type ProxyConfig struct {
-	Enabled   bool       `yaml:"enabled"`
-	Output    string     `yaml:"output"`
-	BindPort  int        `yaml:"bind_port"`
-	Mode      string     `yaml:"mode"`
-	SSL       *SSLConfig `yaml:"ssl"`
+	Enabled  bool       `yaml:"enabled"`
+	Output   string     `yaml:"output"`
+	BindPort int        `yaml:"bind_port"`
+	Mode     string     `yaml:"mode"`
+	SSL      *SSLConfig `yaml:"ssl"`
 }
 
 type SSLConfig struct {
@@ -125,18 +123,67 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+var validLogLevels = map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
+var validProxyModes = map[string]bool{"roundrobin": true, "leastconn": true}
+
+// hasQuoteOrNewline reports whether s contains a single quote or a line
+// break. Such values are interpolated by the supervisor into two kinds of
+// single-quoted context — a `bash -c '…'` word and a SQL string literal
+// (`token = '…'`, `quack:'…'`) — where a `'` escapes the quoting (a shell or
+// SQL injection, and at minimum a broken boot) and a newline splits the
+// command. Rejecting them at load time turns a footgun into a clear config
+// error.
+func hasQuoteOrNewline(s string) bool {
+	for _, r := range s {
+		if r == '\'' || r == '\n' || r == '\r' {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Config) Validate() error {
+	if !validLogLevels[c.Global.LogLevel] {
+		return fmt.Errorf("global.log_level %q is not one of debug, info, warn, error", c.Global.LogLevel)
+	}
+	if c.Listener.HealthInterval <= 0 {
+		return fmt.Errorf("listener.health_interval must be positive")
+	}
+	if c.Proxy != nil && !validProxyModes[c.Proxy.Mode] {
+		return fmt.Errorf("proxy.mode %q is not one of roundrobin, leastconn", c.Proxy.Mode)
+	}
+
+	// Fields that the supervisor interpolates into single-quoted shell words
+	// and SQL string literals must not carry quotes or newlines.
+	if hasQuoteOrNewline(c.Global.DuckDBBin) {
+		return fmt.Errorf("global.duckdb_bin %q may not contain a single quote or newline", c.Global.DuckDBBin)
+	}
+	if hasQuoteOrNewline(c.Listener.BindHost) {
+		return fmt.Errorf("listener.bind_host %q may not contain a single quote or newline", c.Listener.BindHost)
+	}
+
 	if len(c.Shards) == 0 {
 		return fmt.Errorf("at least one shard is required")
 	}
 
 	ports := make(map[int]bool)
+	names := make(map[string]bool)
 	for i, s := range c.Shards {
 		if s.Name == "" {
 			return fmt.Errorf("shard[%d]: name is required", i)
 		}
+		if names[s.Name] {
+			return fmt.Errorf("shard[%d]: duplicate name %q", i, s.Name)
+		}
+		names[s.Name] = true
+		if hasQuoteOrNewline(s.Name) {
+			return fmt.Errorf("shard[%d] (%s): name may not contain a single quote or newline", i, s.Name)
+		}
 		if s.Database == "" {
 			return fmt.Errorf("shard[%d] (%s): database path is required", i, s.Name)
+		}
+		if hasQuoteOrNewline(s.Database) {
+			return fmt.Errorf("shard[%d] (%s): database path may not contain a single quote or newline", i, s.Name)
 		}
 		if _, err := os.Stat(s.Database); os.IsNotExist(err) {
 			return fmt.Errorf("shard[%d] (%s): database file not found: %s", i, s.Name, s.Database)
@@ -148,6 +195,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("shard[%d] (%s): duplicate port %d", i, s.Name, s.Port)
 		}
 		ports[s.Port] = true
+		if hasQuoteOrNewline(s.Token) {
+			return fmt.Errorf("shard[%d] (%s): token may not contain a single quote or newline", i, s.Name)
+		}
 	}
 
 	return nil

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -161,6 +162,64 @@ shards:
     database: /nonexistent/path.db`,
 			wantErr: "database file not found",
 		},
+		{
+			name: "invalid log_level",
+			yaml: `
+global:
+  log_level: verbose
+shards:
+  - name: s1
+    database: ` + dbPath,
+			wantErr: "log_level",
+		},
+		{
+			name: "invalid proxy mode",
+			yaml: `
+shards:
+  - name: s1
+    database: ` + dbPath + `
+proxy:
+  enabled: true
+  mode: round-robin`,
+			wantErr: "proxy.mode",
+		},
+		{
+			name: "duplicate shard name",
+			yaml: `
+shards:
+  - name: dup
+    database: ` + dbPath + `
+    port: 9510
+  - name: dup
+    database: ` + dbPath + `
+    port: 9511`,
+			wantErr: "duplicate name",
+		},
+		{
+			// A single quote in the database path would escape the shell
+			// word and the SQL string literal in the generated boot command.
+			name: "database with single quote",
+			yaml: `
+shards:
+  - name: s1
+    database: /tmp/a'b.db`,
+			wantErr: "database path may not contain a single quote",
+		},
+		{
+			name: "token with single quote",
+			yaml: `
+shards:
+  - name: s1
+    database: ` + dbPath + `
+    token: "it's"`,
+			wantErr: "token may not contain a single quote",
+		},
+		{
+			// YAML decodes the \n escape into a real newline in the value.
+			name:    "duckdb_bin with newline",
+			yaml:    "global:\n  duckdb_bin: \"duckdb\\nevil\"\nshards:\n  - name: s1\n    database: " + dbPath,
+			wantErr: "duckdb_bin",
+		},
 	}
 
 	for _, tt := range tests {
@@ -173,7 +232,7 @@ shards:
 				t.Fatal("expected error, got nil")
 			}
 			errStr := err.Error()
-			if !contains(errStr, tt.wantErr) {
+			if !strings.Contains(errStr, tt.wantErr) {
 				t.Errorf("error %q does not contain %q", errStr, tt.wantErr)
 			}
 		})
@@ -212,19 +271,4 @@ proxy:
 	if cfg.Proxy.Mode != "roundrobin" {
 		t.Errorf("proxy mode = %q, want roundrobin", cfg.Proxy.Mode)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > len(substr) &&
-		(s[:len(substr)] == substr || s[len(s)-len(substr):] == substr ||
-			searchSubstring(s, substr)))
-}
-
-func searchSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }

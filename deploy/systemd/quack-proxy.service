@@ -1,0 +1,57 @@
+# quack-proxy.service — run the quack-proxy daemon under systemd.
+#
+# Install:
+#   sudo useradd -r -s /usr/sbin/nologin quack-proxy   # dedicated unprivileged user
+#   sudo install -D -m 755 ./quack-proxy /usr/local/bin/quack-proxy
+#   sudo install -D -m 644 /path/to/quack-proxy.yaml /etc/quack-proxy/quack-proxy.yaml
+#   sudo install -D -m 644 deploy/systemd/quack-proxy.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now quack-proxy
+#   sudo journalctl -u quack-proxy -f
+#
+# The unit is deliberately minimal: quack-proxy is already the process
+# supervisor for the DuckDB children (it owns their process groups, does the
+# health checking, restart backoff, and clean group stop), so systemd only
+# needs to start/stop that one daemon.
+#
+# Restart= is intentionally left OFF. When the quack-proxy daemon itself dies,
+# its DuckDB children survive (they run in their own process groups) and keep
+# their ports bound; a systemd respawn would start new children that collide
+# with the survivors ("Address already in use"). If the daemon crashes,
+# investigate rather than auto-recover:
+#   systemctl status quack-proxy
+#   # if the DuckDB children are still healthy and serving, they can keep
+#   # serving; otherwise clean up the port holders and start the daemon again.
+
+[Unit]
+Description=quack-proxy — DuckDB Quack cluster manager
+Documentation=https://github.com/alitrack/quack-proxy
+After=network.target
+
+[Service]
+Type=simple
+User=quack-proxy
+Group=quack-proxy
+
+# quack-proxy starts each child in its own process group and stops the whole
+# group on exit. control-group makes systemd wait for that cleanup instead of
+# killing descendants directly; TimeoutStopSec covers the 10s graceful stop.
+KillMode=control-group
+TimeoutStopSec=30
+
+ExecStart=/usr/local/bin/quack-proxy start -c /etc/quack-proxy/quack-proxy.yaml
+
+# See header: no automatic respawn of the daemon.
+Restart=no
+
+# Hardening: drop privileges, no new privs, private /tmp for the per-shard
+# boot-SQL temp files, read-only system dirs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
