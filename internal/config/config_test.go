@@ -155,12 +155,14 @@ shards:
 			wantErr: "duplicate port",
 		},
 		{
-			name: "nonexistent db",
+			// /nonexistent/ does not exist, so the .db's parent directory is
+			// missing — DuckDB cannot create a file there, so we fail loud.
+			name: "missing database directory",
 			yaml: `
 shards:
   - name: s1
     database: /nonexistent/path.db`,
-			wantErr: "database file not found",
+			wantErr: "database directory not found",
 		},
 		{
 			name: "invalid log_level",
@@ -236,6 +238,29 @@ shards:
 				t.Errorf("error %q does not contain %q", errStr, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestNewDatabaseAccepted: a .db file that does not exist yet is fine (DuckDB
+// creates a new database on first open) as long as its directory does — this
+// is the Quick Start case where a user points at ./data/analytics.db before
+// running the daemon for the first time.
+func TestNewDatabaseAccepted(t *testing.T) {
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "data")
+	if err := os.Mkdir(dataDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The file deliberately does NOT exist; only its directory does.
+	newDB := filepath.Join(dataDir, "brand-new.db")
+	yaml := "shards:\n  - name: s1\n    database: " + newDB
+	cfgPath := filepath.Join(tmp, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(cfgPath); err != nil {
+		t.Fatalf("a new .db in an existing directory must be accepted, got: %v", err)
 	}
 }
 

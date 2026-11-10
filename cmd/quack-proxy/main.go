@@ -21,7 +21,7 @@ import (
 
 // version is overridable at build time:
 //
-//	go build -ldflags "-X main.version=v1.2.3" ./cmd/
+//	go build -ldflags "-X main.version=v1.2.3" ./cmd/quack-proxy
 var version = "v0.1.0"
 
 func main() {

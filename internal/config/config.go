@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -185,8 +186,14 @@ func (c *Config) Validate() error {
 		if hasQuoteOrNewline(s.Database) {
 			return fmt.Errorf("shard[%d] (%s): database path may not contain a single quote or newline", i, s.Name)
 		}
-		if _, err := os.Stat(s.Database); os.IsNotExist(err) {
-			return fmt.Errorf("shard[%d] (%s): database file not found: %s", i, s.Name, s.Database)
+		// The .db file itself may not exist yet: DuckDB creates a brand-new
+		// database on first open, so a fresh shard is legitimate. But its
+		// parent directory must — DuckDB cannot create a file in a missing
+		// directory, and a wrong directory is the common typo case. Fail
+		// loud on a missing (or non-directory) parent.
+		dbDir := filepath.Dir(s.Database)
+		if fi, err := os.Stat(dbDir); err != nil || !fi.IsDir() {
+			return fmt.Errorf("shard[%d] (%s): database directory not found: %s", i, s.Name, dbDir)
 		}
 		if s.Port <= 0 || s.Port > 65535 {
 			return fmt.Errorf("shard[%d] (%s): invalid port %d", i, s.Name, s.Port)

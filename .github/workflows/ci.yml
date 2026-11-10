@@ -33,7 +33,7 @@ jobs:
         run: go build ./...
 
       - name: build (windows cross-compile)
-        run: GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/
+        run: GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/quack-proxy
 
       - name: test
         run: go test ./... -count=1

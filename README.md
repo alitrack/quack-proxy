@@ -1,5 +1,6 @@
 # quack-proxy
 
+[![CI](https://github.com/alitrack/quack-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/alitrack/quack-proxy/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
 [![DuckDB](https://img.shields.io/badge/DuckDB-%E2%89%A51.5.2-FFF000?style=flat&logo=duckdb)](https://duckdb.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -68,6 +69,14 @@ shards:
     database: ./data/logs.db
 ```
 
+Create the data directory — the `.db` files **do not** need to exist (DuckDB
+creates a fresh database for each on first open), but their **parent
+directory does**:
+
+```bash
+mkdir -p ./data
+```
+
 ### Run
 
 ```bash
@@ -127,8 +136,9 @@ quack-proxy (Go daemon, ~10MB RSS)
 │   ├── duckdb logs.db      → Quack :9492
 │   └── duckdb users.db     → Quack :9493
 ├── Health Check Loop (every 5s)
-│   └── HTTP GET / → unhealthy? kill whole process group → restart
-│       (exponential backoff 1s→30s; parks a shard after 10 failed tries)
+│   └── HTTP GET / → unhealthy? (after a 30s startup grace) kill whole
+│       process group → restart (exponential backoff 1s→30s; parks a shard
+│       in "stopped" after 10 failed tries)
 ├── Status File (status.json — live shards, ports, tokens, uptime)
 ├── Signal Handler (SIGHUP incremental reload, SIGTERM shutdown)
 ├── HAProxy Config Generator
@@ -143,6 +153,25 @@ Each DuckDB process gets:
 - Its own process group, so a stop takes the whole tree (wrapper + engine +
   keep-alive) with it — no orphaned listener, no leaked FDs
 - Graceful shutdown via SIGTERM to the group (10s timeout → SIGKILL)
+
+### Shard lifecycle
+
+Each shard moves through a small set of states, all reflected in `status` and
+the status file:
+
+| State | Meaning |
+|-------|---------|
+| `starting` | Process spawned; Quack not yet answering. For the first **30s** after any (re)start, a failing health check keeps it here rather than restarting it — this absorbs a slow first boot (DuckDB `INSTALL`/`LOAD` can take tens of seconds before `quack_serve` binds). |
+| `healthy` | Answering the health check. |
+| `unhealthy` | Failing the health check and inside a restart backoff window. |
+| `stopped` | **Terminal** — the shard exhausted its retry budget (10 consecutive failed restarts) and has been parked. It stays stopped (no further churn) until the config is reloaded or the daemon is restarted. |
+
+On each unhealthy detection after the startup grace, the shard is restarted
+with an exponential backoff (1s → 2s → 4s … capped at 30s) and a running
+attempt counter. A healthy response resets both. The design goal is: a
+transient blip recovers within a second or two, a genuinely broken shard stops
+churning after a bounded number of tries and reports itself clearly, instead
+of killing-and-relaunching forever.
 
 ---
 
@@ -196,7 +225,7 @@ See [`quack-proxy.example.yaml`](quack-proxy.example.yaml) for a fully annotated
 | `listener.health_path` | string | `/` | Health check HTTP path |
 | `listener.health_interval` | duration | `5s` | Health check interval (picked up on reload) |
 | `shards[].name` | string | *required* | Logical shard name (unique) |
-| `shards[].database` | string | *required* | Path to `.duckdb` file (must exist) |
+| `shards[].database` | string | *required* | Path to `.duckdb` file. The **directory** must exist; the `.db` file itself may not (DuckDB creates a new database on first open — a fresh shard is legitimate). A single quote or newline in the path is rejected. |
 | `shards[].port` | int | auto | Override auto-assigned port |
 | `shards[].token` | string | auto-generated | Quack auth token (crypto-random when unset) |
 | `shards[].init_sql` | string | — | SQL injected at shard boot, after `LOAD quack` and before `quack_serve`. Use for RBAC hooks, extensions, seed setup. Delivered verbatim — multi-statement and dollar-quoted bodies are safe. |
@@ -309,6 +338,32 @@ Usually caused by:
    INSTALL quack; LOAD quack;
    ```
 
+4. **Port already in use** — another process (or a leftover from a previous
+   run) holds the shard's port. Find and stop it, then the next restart
+   reclaims the port:
+   ```bash
+   lsof -nP -iTCP:9491 -sTCP:LISTEN
+   ```
+
+### A shard is stuck in `stopped`
+
+This is the terminal state a shard parks into after **10 consecutive failed
+retries** (see *Shard lifecycle*). It is not a crash you can wait out — the
+supervisor has deliberately stopped churning. Fix the underlying cause, then
+one of:
+
+- **`quack-proxy reload`** (SIGHUP) — re-reads the config; a shard that is
+  still configured is started fresh with a reset retry budget.
+- **`quack-proxy stop && quack-proxy start`** — full restart of the daemon
+  and all shards.
+
+The usual root causes are the same as *"shard unhealthy, restarting"* above,
+plus: the database directory is not writable by the `quack-proxy` user, the
+`duckdb_bin` path is wrong / not executable, or the Quack extension can't be
+installed (no network to the extension repository, or an extension build
+missing for your DuckDB version — see `examples/duckdb_serve_host.py` for the
+version matrix).
+
 ### ATTACH fails with connection error
 
 If connecting from a different machine, the config must use `bind_host: 0.0.0.0` (not localhost):
@@ -344,7 +399,7 @@ quack-proxy is a **process supervisor**, not a distributed database:
 ```bash
 git clone https://github.com/alitrack/quack-proxy.git
 cd quack-proxy
-go build -o quack-proxy ./cmd/...
+go build -o quack-proxy ./cmd/quack-proxy
 ./quack-proxy version
 ```
 
@@ -354,6 +409,14 @@ Requirements:
 - Linux or macOS (the supervisor drives each shard through a `bash` process
   group; a Windows port is a non-goal for v0.1)
 
+**Running under systemd:** a ready-to-install unit with hardening and the
+"why we don't auto-respawn the daemon" rationale lives in
+[`deploy/systemd/quack-proxy.service`](deploy/systemd/quack-proxy.service).
+
+**CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs gofmt,
+`go vet`, Linux + Windows cross-builds, the Go suite, and the Python
+splitter suite on every push/PR.
+
 ### Testing
 
 This project started as a rapid prototype — the initial development cycle
@@ -362,15 +425,21 @@ unit tests. The main bug found during that phase (signalling the bash wrapper
 orphaning the whole child tree) was caught by integration testing, not unit
 tests — a reminder that real process-management bugs need real subprocesses.
 
-The test suite now covers all five packages (31 tests, `go test ./...` passes
+The Go suite covers all five packages (34 tests, `go test ./...` passes
 clean). It exercises the parts that used to be wrong: whole-process-group
-teardown, restart backoff and retry parking, crypto token generation,
-config validation, health-check logic, HAProxy output correctness, and CLI
+teardown, restart backoff and retry parking, the slow-boot startup grace,
+crypto token generation, config validation (including quote-injection
+rejection), health-check logic, HAProxy output correctness, and CLI
 pid-file handling. Lifecycle tests use a stub `duckdb_bin` (`true`/`cat`) so
 they stay fast and hermetic.
 
+The Python statement splitter (`examples/duckdb_serve_host.py`) has its own
+14-test suite (`examples/duckdb_serve_host_test.py`) that needs no DuckDB
+install. CI runs both:
+
 ```bash
 go test ./... -v -count=1
+python3 examples/duckdb_serve_host_test.py
 ```
 
 ---
