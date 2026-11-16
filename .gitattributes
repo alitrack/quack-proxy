@@ -1,0 +1,24 @@
+# All text must stay LF in the working tree. gofmt reports CRLF .go files as
+# unformatted, and a CRLF `*.sh` fails `bash -n` (and `#!/bin/bash\r` is a
+# broken shebang on Linux). r7 found several upstream text files still had
+# CRLF in a Windows checkout because core.autocrlf=true restored it; the
+# extra patterns below close that gap for every tracked text type.
+# Git blobs are already LF — these attributes only control checkout.
+# A default rule also covers future file types (.json, .toml, extensionless
+# files). `text=auto` keeps real binaries untouched. The attributes file
+# itself needs an explicit rule: otherwise autocrlf=true rewrites it on the
+# next checkout and the whole guard becomes CRLF on a Windows machine.
+*              text=auto eol=lf
+.gitattributes text eol=lf
+*.go   text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sh   text eol=lf
+*.service text eol=lf
+*.py   text eol=lf
+*.sql  text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+LICENSE text eol=lf
+.gitignore text eol=lf

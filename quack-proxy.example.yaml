@@ -14,17 +14,29 @@ global:
                             # May be a wrapper script (see examples/duckdb-python-host.sh).
                             # Must be an executable on PATH (or an absolute path);
                             # must not contain a single quote or newline.
+  # allow_unsigned_extensions: false  # default. Adds -unsigned to DuckDB only
+                            # when true; unsigned extensions can load arbitrary
+                            # native code. Pre-install + hash-verify first.
 
 listener:
-  bind_host: 0.0.0.0        # Quack listen address. 0.0.0.0 for LAN access;
-                            # 127.0.0.1 to keep it local-only.
+  bind_host: 127.0.0.1      # DEFAULT is loopback. Quack speaks plaintext HTTP
+                            # and the token is the only credential: exposing
+                            # 0.0.0.0 to a LAN requires external TLS termination.
+  # allow_other_hostname: false  # set true only when clients reach a shard
+                            # through a VIP or DNS name (Host-header check).
   port_start: 9491          # first auto-assigned port (shards increment from here)
-  health_path: /            # HTTP path the health check GETs (Quack root returns the RPC greeting)
+  health_path: /            # must be a plain absolute path; schemes, '//',
+                            # userinfo (@) and whitespace are rejected (R-09).
+  # health_expect: "This is a DuckDB Quack RPC endpoint"
+                            # optional: require this substring in the health
+                            # response body, so an unrelated 2xx HTTP server
+                            # on the port is not mistaken for a healthy shard.
   health_interval: 5s       # how often each shard is health-checked
 
 shards:
-  # name:    logical name; must be unique and quote-free (it becomes an
-  #          ATTACH alias and a process-group label).
+  # name:    logical name; must be unique and match ^[A-Za-z_][A-Za-z0-9_]*$
+  #          (it becomes an ATTACH alias, a temp-file name and an HAProxy
+  #          server name). Path traversal / spaces are rejected (R-13).
   # database: path to the .duckdb file; must exist and be quote-free.
   # port:    optional; auto-assigned from port_start if omitted.
   # token:   optional; a 32-char crypto-random token is generated and stored
@@ -53,9 +65,25 @@ shards:
   # init_sql_file: /etc/quack-proxy/rbac-init.sql
 
 # Optional load-balancer config generation (used by `quack-proxy gen-proxy`).
+# IMPORTANT: gen-proxy only supports ONE shard per backend (a port-forward).
+# Multi-shard backends are rejected (R-04): different .db files are partitions
+# (non-deterministic round-robin, distinct tokens), and the SAME .db cannot be
+# opened by two DuckDB writers — v2.0.0 fails with "Could not set lock on
+# file". Real replicas need cross-machine replication (out of scope).
+# For multiple shards, ATTACH each one separately.
+# `proxy.ssl.enabled: true` is rejected: TLS must be terminated externally.
+# The emitted config passes `haproxy -c -f` but starts as root without
+# chroot/user (R-23). quack-proxy writes the file but never starts HAProxy.
+# For production, set `hardened: true` below AND first run
+#   sudo bash scripts/verify-hardening.sh
+# which pre-provisions the `haproxy` account + root-owned 0755
+# /var/lib/haproxy chroot and verifies with the real HAProxy binary that the
+# process drops root. Leaving it false keeps the three directives commented
+# so an unprepared host can still start HAProxy.
 # Uncomment to have quack-proxy emit an HAProxy config for the frontend.
 # proxy:
 #   enabled: true
 #   output: /etc/haproxy/quack-proxy.cfg   # required for gen-proxy
 #   bind_port: 9490                        # frontend port; required
 #   mode: roundrobin                       # roundrobin (default) | leastconn
+#   hardened: false                        # true = emit chroot/user/group (R-23)

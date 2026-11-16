@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,17 @@ func testLogger() *slog.Logger {
 // command in the shell pipeline and the child would die with "command not
 // found" (this is the failure the old tests silently tripped over). The child
 // work is stubbed by "true" (exit 0, ignores its arguments).
+// requireUnix skips tests that fork the bash/tail pipeline or rely on POSIX
+// process-group signals. Windows support is a documented non-goal: the
+// supervisor hardcodes bash/tail and attr_windows.go has no process-group
+// semantics (R-18). Skipping is honest; pretending these pass on Windows is not.
+func requireUnix(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process-group pipeline is not supported on Windows (R-18)")
+	}
+}
+
 func testConfig(shards ...config.ShardConfig) *config.Config {
 	return &config.Config{
 		Global:   config.GlobalConfig{DuckDBBin: "true"},
@@ -58,6 +70,7 @@ func TestAttachSQL(t *testing.T) {
 }
 
 func TestStartAndStopShard(t *testing.T) {
+	requireUnix(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "test.db")
 	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
@@ -101,6 +114,7 @@ func TestStartAndStopShard(t *testing.T) {
 // group alive after that is exactly the pipeline's `tail -f /dev/null`, the
 // real cause of the old leak. Stopping must take the whole group with it.
 func TestStopKillsWholeProcessGroup(t *testing.T) {
+	requireUnix(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "group.db")
 	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
@@ -151,7 +165,7 @@ func TestStopKillsWholeProcessGroup(t *testing.T) {
 func TestBuildBootSQLInitSQL(t *testing.T) {
 	cfg := config.ShardConfig{Name: "s", Database: "/x.db", Port: 9599,
 		InitSQL: "INSTALL luajit FROM community; LOAD luajit;"}
-	got, err := buildBootSQL("0.0.0.0", cfg, "tk")
+	got, err := buildBootSQL("0.0.0.0", cfg, "tk", false)
 	if err != nil {
 		t.Fatalf("buildBootSQL: %v", err)
 	}
@@ -162,7 +176,7 @@ func TestBuildBootSQLInitSQL(t *testing.T) {
 	}
 
 	plain := config.ShardConfig{Name: "s", Database: "/x.db", Port: 9600}
-	got2, err := buildBootSQL("127.0.0.1", plain, "tk2")
+	got2, err := buildBootSQL("127.0.0.1", plain, "tk2", false)
 	if err != nil {
 		t.Fatalf("buildBootSQL: %v", err)
 	}
@@ -180,7 +194,7 @@ func TestBuildBootSQLInitSQL(t *testing.T) {
 func TestBuildBootSQLMissingInitFile(t *testing.T) {
 	missing := config.ShardConfig{Name: "s", Database: "/x.db", Port: 9601,
 		InitSQLFile: filepath.Join(t.TempDir(), "does-not-exist.sql")}
-	if _, err := buildBootSQL("127.0.0.1", missing, "tk"); err == nil {
+	if _, err := buildBootSQL("127.0.0.1", missing, "tk", false); err == nil {
 		t.Error("expected error for missing init_sql_file, got nil")
 	}
 
@@ -191,7 +205,7 @@ func TestBuildBootSQLMissingInitFile(t *testing.T) {
 	}
 	cfg := config.ShardConfig{Name: "s", Database: "/x.db", Port: 9602,
 		InitSQL: "SELECT 0;", InitSQLFile: p}
-	got, err := buildBootSQL("127.0.0.1", cfg, "tk")
+	got, err := buildBootSQL("127.0.0.1", cfg, "tk", false)
 	if err != nil {
 		t.Fatalf("buildBootSQL: %v", err)
 	}
@@ -216,6 +230,7 @@ func TestStatus(t *testing.T) {
 // against a port that never answers: the shard must be restarted (not
 // stormed), backoff must grow, and the streak must reset after recovery.
 func TestCheckAllRestartsThenBacksOff(t *testing.T) {
+	requireUnix(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "hc.db")
 	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
@@ -278,6 +293,7 @@ func TestCheckAllRestartsThenBacksOff(t *testing.T) {
 // TestCheckAllParksAfterMaxRestarts verifies a persistently-failing shard is
 // stopped after maxRestarts attempts instead of restarting forever.
 func TestCheckAllParksAfterMaxRestarts(t *testing.T) {
+	requireUnix(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "park.db")
 	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
@@ -309,6 +325,7 @@ func TestCheckAllParksAfterMaxRestarts(t *testing.T) {
 // startup grace (slow INSTALL/LOAD before quack_serve binds) is NOT restarted
 // while unhealthy, but is restarted once the grace has elapsed.
 func TestCheckAllRespectsStartupGrace(t *testing.T) {
+	requireUnix(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "grace.db")
 	if err := os.WriteFile(dbPath, []byte{}, 0644); err != nil {
@@ -348,9 +365,13 @@ func TestCheckAllRespectsStartupGrace(t *testing.T) {
 }
 
 func TestLookupBin(t *testing.T) {
+	requireUnix(t)
 	if _, ok := lookupBin("sh"); !ok {
 		t.Error("lookupBin(\"sh\") should find the shell on PATH")
 	}
+}
+
+func TestLookupBinRejectsMissing(t *testing.T) {
 	if _, ok := lookupBin("quack-proxy-definitely-not-a-real-binary-xyz"); ok {
 		t.Error("lookupBin of a nonexistent binary must report not found")
 	}

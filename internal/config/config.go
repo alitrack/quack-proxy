@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,6 +28,10 @@ type GlobalConfig struct {
 	// (verified 2026-11-09: v2.0.0-alpha39998 rejects even the correct
 	// server token; 2.0.0-alpha48730 works).
 	DuckDBBin string `yaml:"duckdb_bin"`
+	// AllowUnsignedExtensions re-enables DuckDB's -unsigned flag. It is off
+	// by default: an unsigned extension can load arbitrary native code, so
+	// only enable it after pre-installing and hash-verifying the extensions.
+	AllowUnsignedExtensions bool `yaml:"allow_unsigned_extensions"`
 }
 
 type ListenerConfig struct {
@@ -33,6 +39,14 @@ type ListenerConfig struct {
 	PortStart      int           `yaml:"port_start"`
 	HealthPath     string        `yaml:"health_path"`
 	HealthInterval time.Duration `yaml:"health_interval"`
+	// HealthExpect is an optional substring that the health response body
+	// must contain. A bare 2xx from an unrelated HTTP server on the shard
+	// port is otherwise a false positive (R-09). Operators who know their
+	// Quack greeting can pin it here; empty keeps liveness-only behaviour.
+	HealthExpect string `yaml:"health_expect"`
+	// AllowOtherHostname relaxes Quack's Host-header check. Off by default;
+	// enable only when clients reach a shard through a VIP or DNS name.
+	AllowOtherHostname bool `yaml:"allow_other_hostname"`
 }
 
 type ShardConfig struct {
@@ -63,6 +77,12 @@ type ProxyConfig struct {
 	BindPort int        `yaml:"bind_port"`
 	Mode     string     `yaml:"mode"`
 	SSL      *SSLConfig `yaml:"ssl"`
+	// Hardened emits `chroot` / `user` / `group` into the generated HAProxy
+	// global section instead of merely documenting them as comments (R-23).
+	// It is OFF by default on purpose: those directives require a host-local
+	// `haproxy` account and a root-owned chroot directory. Enabling it without
+	// running scripts/verify-hardening.sh first makes HAProxy refuse to start.
+	Hardened bool `yaml:"hardened"`
 }
 
 type SSLConfig struct {
@@ -103,7 +123,10 @@ func (c *Config) applyDefaults() {
 		c.Global.StatusFile = "/var/run/quack-proxy/status.json"
 	}
 	if c.Listener.BindHost == "" {
-		c.Listener.BindHost = "0.0.0.0"
+		// Loopback by default: Quack speaks plaintext HTTP and the generated
+		// token is the only credential. Reaching the LAN must be an explicit,
+		// deliberate change (R-05).
+		c.Listener.BindHost = "127.0.0.1"
 	}
 	if c.Listener.PortStart == 0 {
 		c.Listener.PortStart = 9491
@@ -126,6 +149,12 @@ func (c *Config) applyDefaults() {
 
 var validLogLevels = map[string]bool{"debug": true, "info": true, "warn": true, "error": true}
 var validProxyModes = map[string]bool{"roundrobin": true, "leastconn": true}
+
+// Shard names become ATTACH aliases, temp-file name components and HAProxy
+// server names, so anything outside an identifier is unsafe (path traversal,
+// SQL alias corruption, config-line injection). See R-13.
+var validShardName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var validBindHost = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
 // hasQuoteOrNewline reports whether s contains a single quote or a line
 // break. Such values are interpolated by the supervisor into two kinds of
@@ -153,6 +182,23 @@ func (c *Config) Validate() error {
 	if c.Proxy != nil && !validProxyModes[c.Proxy.Mode] {
 		return fmt.Errorf("proxy.mode %q is not one of roundrobin, leastconn", c.Proxy.Mode)
 	}
+	if c.Proxy != nil && c.Proxy.SSL != nil && c.Proxy.SSL.Enabled {
+		// Fail loud instead of letting operators believe traffic is encrypted.
+		// TLS termination belongs to the external proxy for now (R-05).
+		return fmt.Errorf("proxy.ssl.enabled is not implemented: terminate TLS in an external proxy; refusing a config that only looks encrypted")
+	}
+	if len(c.Listener.HealthExpect) > 256 {
+		return fmt.Errorf("listener.health_expect is too long (max 256 bytes)")
+	}
+	if !validBindHost.MatchString(c.Listener.BindHost) {
+		return fmt.Errorf("listener.bind_host %q must be a plain hostname or IP (no userinfo, spaces or slashes)", c.Listener.BindHost)
+	}
+	// health_path is interpolated into a URL. Reject anything that could
+	// change the scheme or host, e.g. "http://127.0.0.1:9491@evil.com/".
+	hp := c.Listener.HealthPath
+	if !strings.HasPrefix(hp, "/") || strings.ContainsAny(hp, " \t\r\n@\\") || strings.Contains(hp, "://") || strings.Contains(hp, "//") {
+		return fmt.Errorf("listener.health_path %q must be a plain absolute path starting with '/' (no scheme, userinfo, whitespace or '//')", hp)
+	}
 
 	// Fields that the supervisor interpolates into single-quoted shell words
 	// and SQL string literals must not carry quotes or newlines.
@@ -177,8 +223,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("shard[%d]: duplicate name %q", i, s.Name)
 		}
 		names[s.Name] = true
-		if hasQuoteOrNewline(s.Name) {
-			return fmt.Errorf("shard[%d] (%s): name may not contain a single quote or newline", i, s.Name)
+		if !validShardName.MatchString(s.Name) {
+			return fmt.Errorf("shard[%d] (%s): name must match ^[A-Za-z_][A-Za-z0-9_]*$ (used as an ATTACH alias, temp-file name and HAProxy server name)", i, s.Name)
 		}
 		if s.Database == "" {
 			return fmt.Errorf("shard[%d] (%s): database path is required", i, s.Name)

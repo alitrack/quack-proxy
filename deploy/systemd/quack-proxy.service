@@ -17,14 +17,16 @@
 # Restart= is intentionally left OFF. When the quack-proxy daemon itself dies,
 # its DuckDB children survive (they run in their own process groups) and keep
 # their ports bound; a systemd respawn would start new children that collide
-# with the survivors ("Address already in use"). If the daemon crashes,
-# investigate rather than auto-recover:
+# with the survivors ("Address already in use"). A startup port precheck now
+# REFUSES to start on an occupied port (R-22), so an automatic respawn could
+# never succeed anyway. If the daemon crashes, investigate rather than
+# auto-recover:
 #   systemctl status quack-proxy
 #   # if the DuckDB children are still healthy and serving, they can keep
 #   # serving; otherwise clean up the port holders and start the daemon again.
 
 [Unit]
-Description=quack-proxy — DuckDB Quack cluster manager
+Description=quack-proxy — single-host DuckDB + Quack process supervisor
 Documentation=https://github.com/alitrack/quack-proxy
 After=network.target
 
@@ -38,6 +40,13 @@ Group=quack-proxy
 # killing descendants directly; TimeoutStopSec covers the 10s graceful stop.
 KillMode=control-group
 TimeoutStopSec=30
+
+# quack-proxy runs as an unprivileged user but defaults its pid/status files
+# to /var/run/quack-proxy/. Without RuntimeDirectory it cannot create that
+# directory and `start` exits immediately. See REMEDIATION.md R-06.
+RuntimeDirectory=quack-proxy
+RuntimeDirectoryMode=0750
+UMask=0077
 
 ExecStart=/usr/local/bin/quack-proxy start -c /etc/quack-proxy/quack-proxy.yaml
 

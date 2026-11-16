@@ -171,3 +171,35 @@ ANALYTICS_PID=$(ss -tlnp | grep ':9491 ' | grep -oP 'pid=\K[0-9]+')
 kill -9 $ANALYTICS_PID
 # Watch: curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9491/
 ```
+
+---
+
+## 2026-11-13 补充：真实端到端基准（与上文口径不同）
+
+> 上表测的是**空库 `GET /` RPC greeting，直打分片端口**，quack-proxy 不在数据
+> 路径，HAProxy 未参与；引擎为 1.5.2 nightly。因此 83K / 169K QPS **不是产品
+> 性能指标**，README 已改标为 historical benchmark。
+
+整改后新增 `scripts/quack-e2e.sh --benchmark N`，走**真实 Quack 协议**：
+第二个 DuckDB 客户端 `CREATE SECRET (TYPE QUACK, TOKEN ...)` →
+`ATTACH 'quack:127.0.0.1:PORT'` → N 次 `SELECT`。
+
+实机（2026-11-13，Linux 容器，DuckDB **v2.0.0 stable pinned**，签名 core
+`quack` 扩展，单分片）：
+
+| 项 | 结果 |
+|----|------|
+| `GET /` | HTTP 200，body 为 `This is a DuckDB Quack RPC endpoint...` |
+| 健康循环 | 正确报告 `healthy` |
+| 正确 token | `ATTACH/SELECT` 返回预期行 |
+| 错误 token | 被拒绝 |
+| 50 次顺序 `SELECT` 往返 | 首次 **221 ms（~226 qps）**；r4 最终复跑 **312 ms（~160 qps）**，单客户端、含 ATTACH |
+| 停止后 | 端口释放，无孤儿监听；r4 连续 3 轮（端口 19491 / 19512 / 19513）均 `ALL_QUACK_E2E_CHECKS_PASSED` |
+| r5 复跑（30 次往返） | 155 / 323 / 162 / 148 ms（~92–202 qps，单客户端含 ATTACH）；5 轮通过，另 1 轮因冷启动超过脚本 30s 等待窗口失败，已把窗口加长到 60s 并增强诊断 |
+
+**这个数字是单客户端顺序往返延迟，不是吞吐基准**，与上文 83K QPS 不可比较。两次实测差异来自共享宿主机负载，不应解读为性能回退或提升。
+复现：`bash scripts/quack-e2e.sh --benchmark 200`。默认首次运行会联网下载
+pinned DuckDB CLI 并 `INSTALL quack`；也可自行预置 CLI（`--duckdb`）并把签名
+core 扩展预装到 DuckDB 扩展目录，脚本会优先 `LOAD quack` 复用本地副本，
+因此在扩展 CDN 不可用（实测 HTTP 502）的环境中仍可离线运行。CI 里有
+advisory 的 `quack-e2e` job 跑 50 次。

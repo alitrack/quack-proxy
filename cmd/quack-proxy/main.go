@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -22,7 +23,7 @@ import (
 // version is overridable at build time:
 //
 //	go build -ldflags "-X main.version=v1.2.3" ./cmd/quack-proxy
-var version = "v0.1.0"
+var version = "dev"
 
 func main() {
 	flag.Usage = usage
@@ -56,6 +57,22 @@ func main() {
 	}
 }
 
+// windowsUnsupportedMessage is emitted by `start` on Windows. Before r9 the
+// binary printed "duckdb_bin ... not found on PATH or not executable" (a
+// POSIX-mode-bit false negative) or died inside a missing bash, making the
+// published artifact look merely misconfigured instead of unsupported.
+const windowsUnsupportedMessage = `quack-proxy: Windows is not a supported runtime platform (R-18).
+Shard hosting needs a POSIX shell (bash, cat, tail -f /dev/null), /dev/null
+and process-group semantics; the Windows build provides none of them.
+Use the Linux or macOS binary, or run the Linux binary under WSL2.
+See docs/SCOPE.md and docs/REMEDIATION.md (R-18).`
+
+// runtimeSupported is split out so the platform policy can be unit-tested on
+// any host (CI itself runs on Linux).
+func runtimeSupported(goos string) bool {
+	return goos != "windows"
+}
+
 func findConfigArg(args []string) string {
 	for i, a := range args {
 		if a == "-c" && i+1 < len(args) {
@@ -74,7 +91,8 @@ func usage() {
 Usage:
   quack-proxy start [-c config.yaml]     Start daemon
   quack-proxy stop [-c config.yaml]       Stop daemon
-  quack-proxy status [-c config.yaml]     Show shard status
+  quack-proxy status [--json] [--show-tokens] [-c config.yaml]
+                                        Show shard status (tokens redacted by default)
   quack-proxy reload [-c config.yaml]     Hot-reload configuration
   quack-proxy gen-proxy [-c config.yaml]  Generate HAProxy config
   quack-proxy version                     Print version
@@ -82,6 +100,12 @@ Usage:
 }
 
 func runStart(cfgPath string) {
+	// Fail with the real reason instead of letting a Windows user chase a
+	// bogus "duckdb_bin not executable" or a silently dead shard.
+	if !runtimeSupported(runtime.GOOS) {
+		fmt.Fprintln(os.Stderr, windowsUnsupportedMessage)
+		os.Exit(1)
+	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
@@ -114,8 +138,19 @@ func runStart(cfgPath string) {
 				logger.Error("reload failed; keeping current configuration", "error", err)
 				continue
 			}
-			added, removed := sup.ApplyConfig(ctx, newCfg)
-			logger.Info("config reloaded", "added", len(added), "removed", len(removed))
+			added, removed, restarted := sup.ApplyConfig(ctx, newCfg)
+			cfg = newCfg // keep shutdown cleanup pointing at the live paths
+			logger.Info("config reloaded", "added", len(added), "removed", len(removed), "restarted", len(restarted))
+			// R-07 (partial): keep the generated LB config in sync with the
+			// reloaded shard list. HAProxy itself must still be reloaded by
+			// the operator; quack-proxy does not manage that process.
+			if newCfg.Proxy != nil && newCfg.Proxy.Enabled && newCfg.Proxy.Output != "" {
+				if err := proxy.GenerateHAProxy(newCfg, newCfg.Proxy.Output); err != nil {
+					logger.Warn("reload: HAProxy config not regenerated", "error", err)
+				} else {
+					logger.Warn("reload: HAProxy config regenerated; reload HAProxy manually to apply", "path", newCfg.Proxy.Output)
+				}
+			}
 		default:
 			logger.Info("shutting down", "signal", sig)
 			cancel()
@@ -155,9 +190,39 @@ type shardJSON struct {
 	PID             int    `json:"pid"`
 	Uptime          string `json:"uptime"`
 	Restarts        int    `json:"restarts"`
-	Token           string `json:"token"`
+	Token           string `json:"token,omitempty"`
 	Database        string `json:"database"`
 	LastHealthCheck string `json:"last_health_check,omitempty"`
+}
+
+// buildStatus maps the on-disk status file to the CLI's output shape. Tokens
+// are redacted unless explicitly requested: the tokens are the ONLY
+// authentication credential a Quack endpoint has, and `status` is runnable by
+// any local user able to read the config (R-05).
+func buildStatus(sf *supervisor.StatusFile, showTokens bool) statusJSON {
+	var out statusJSON
+	for _, r := range sf.Shards {
+		sj := shardJSON{
+			Name:            r.Name,
+			Port:            r.Port,
+			Status:          r.Status,
+			PID:             r.PID,
+			Restarts:        r.Restarts,
+			Database:        r.Database,
+			LastHealthCheck: r.LastCheck,
+		}
+		if showTokens {
+			sj.Token = r.Token
+		}
+		if start, err := time.Parse(time.RFC3339, r.StartTime); err == nil {
+			sj.Uptime = time.Since(start).Round(time.Second).String()
+		}
+		out.Shards = append(out.Shards, sj)
+		if r.AttachSQL != "" {
+			out.CoordinatorAttachSQL += r.AttachSQL + "\n"
+		}
+	}
+	return out
 }
 
 func runStatus(cfgPath string) {
@@ -172,33 +237,16 @@ func runStatus(cfgPath string) {
 		os.Exit(1)
 	}
 
-	var out statusJSON
-	for _, r := range sf.Shards {
-		sj := shardJSON{
-			Name:            r.Name,
-			Port:            r.Port,
-			Status:          r.Status,
-			PID:             r.PID,
-			Restarts:        r.Restarts,
-			Token:           r.Token,
-			Database:        r.Database,
-			LastHealthCheck: r.LastCheck,
-		}
-		if start, err := time.Parse(time.RFC3339, r.StartTime); err == nil {
-			sj.Uptime = time.Since(start).Round(time.Second).String()
-		}
-		out.Shards = append(out.Shards, sj)
-		if r.AttachSQL != "" {
-			out.CoordinatorAttachSQL += r.AttachSQL + "\n"
-		}
-	}
-
-	jsonFlag := false
+	jsonFlag, showTokens := false, false
 	for _, arg := range flag.Args() {
-		if arg == "--json" {
+		switch arg {
+		case "--json":
 			jsonFlag = true
+		case "--show-tokens":
+			showTokens = true
 		}
 	}
+	out := buildStatus(sf, showTokens)
 	if jsonFlag {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -244,12 +292,41 @@ func runGenProxy(cfgPath string) {
 	fmt.Printf("HAProxy config written to %s\n", cfg.Proxy.Output)
 }
 
+// writePrivateFile writes data to path with 0600 via a temp file + rename,
+// so readers never see a partial file and an existing world-readable file is
+// replaced rather than silently kept (R-11).
+func writePrivateFile(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".quack-proxy-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, 0600); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func writePID(path string) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create pid dir %s: %w", dir, err)
 	}
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
+	return writePrivateFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())))
 }
 
 func getPIDFile(cfgPath string) string {

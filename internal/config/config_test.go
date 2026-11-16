@@ -92,8 +92,8 @@ shards:
 		t.Errorf("default log_level = %q, want info", cfg.Global.LogLevel)
 	}
 
-	if cfg.Listener.BindHost != "0.0.0.0" {
-		t.Errorf("default bind_host = %q, want 0.0.0.0", cfg.Listener.BindHost)
+	if cfg.Listener.BindHost != "127.0.0.1" {
+		t.Errorf("default bind_host = %q, want 127.0.0.1 (loopback by default)", cfg.Listener.BindHost)
 	}
 
 	if cfg.Listener.PortStart != 9491 {
@@ -222,6 +222,74 @@ shards:
 			yaml:    "global:\n  duckdb_bin: \"duckdb\\nevil\"\nshards:\n  - name: s1\n    database: " + dbPath,
 			wantErr: "duckdb_bin",
 		},
+		{
+			name: "shard name with path traversal",
+			yaml: `
+shards:
+  - name: "../escape"
+    database: ` + dbPath,
+			wantErr: "name must match",
+		},
+		{
+			name: "shard name with space",
+			yaml: `
+shards:
+  - name: "bad name"
+    database: ` + dbPath,
+			wantErr: "name must match",
+		},
+		{
+			name: "health_path with userinfo SSRF",
+			yaml: `
+listener:
+  health_path: "http://127.0.0.1:9491@evil.com/"
+shards:
+  - name: s1
+    database: ` + dbPath,
+			wantErr: "health_path",
+		},
+		{
+			name: "bind_host with userinfo",
+			yaml: `
+listener:
+  bind_host: "127.0.0.1@evil.com"
+shards:
+  - name: s1
+    database: ` + dbPath,
+			wantErr: "bind_host",
+		},
+		{
+			name: "health_expect too long",
+			yaml: `
+listener:
+  health_expect: "` + strings.Repeat("x", 257) + `"
+shards:
+  - name: s1
+    database: ` + dbPath,
+			wantErr: "health_expect",
+		},
+		{
+			name: "health_expect accepted",
+			yaml: `
+listener:
+  health_expect: "quack-greeting"
+shards:
+  - name: s1
+    database: ` + dbPath,
+			wantErr: "",
+		},
+		{
+			name: "proxy ssl is not implemented",
+			yaml: `
+shards:
+  - name: s1
+    database: ` + dbPath + `
+proxy:
+  enabled: true
+  ssl:
+    enabled: true`,
+			wantErr: "proxy.ssl.enabled is not implemented",
+		},
 	}
 
 	for _, tt := range tests {
@@ -230,6 +298,12 @@ shards:
 			os.WriteFile(cfgPath, []byte(tt.yaml), 0644)
 
 			_, err := Load(cfgPath)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected a valid config, got: %v", err)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}

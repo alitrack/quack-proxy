@@ -6,8 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/alitrack/quack-proxy/internal/supervisor"
 )
 
 func TestFindConfigArg(t *testing.T) {
@@ -117,6 +121,12 @@ func TestRunningPID(t *testing.T) {
 		}
 	}
 
+	// signal(0) liveness probing and child reaping are POSIX-only. The
+	// Windows build is a documented non-goal (R-18), so stop here on it.
+	if runtime.GOOS == "windows" {
+		t.Skip("signal(0) liveness probing is POSIX-only (R-18)")
+	}
+
 	// A dead but plausible pid is rejected (signal 0 -> ESRCH). Use a real
 	// process that we start and then wait on, so the pid is genuinely gone.
 	cmd := exec.Command("true")
@@ -161,6 +171,70 @@ func TestLevelFromString(t *testing.T) {
 	for _, c := range cases {
 		if got := levelFromString(c.in); got != c.want {
 			t.Errorf("levelFromString(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// R-05: the token is the only Quack credential, so `status` must not print
+// it unless the operator explicitly asks.
+func TestBuildStatusRedactsTokens(t *testing.T) {
+	sf := &supervisor.StatusFile{Shards: []supervisor.StatusFileRecord{
+		{Name: "s1", Port: 9491, Status: "healthy", Token: "SUPER-SECRET", StartTime: "2026-11-13T00:00:00Z"},
+	}}
+	redacted := buildStatus(sf, false)
+	if len(redacted.Shards) != 1 || redacted.Shards[0].Token != "" {
+		t.Errorf("default status must not expose tokens: %+v", redacted.Shards)
+	}
+	shown := buildStatus(sf, true)
+	if shown.Shards[0].Token != "SUPER-SECRET" {
+		t.Errorf("--show-tokens must expose tokens, got %+v", shown.Shards)
+	}
+}
+
+func TestWritePIDIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not enforced on Windows")
+	}
+	tmp := t.TempDir()
+	pidFile := filepath.Join(tmp, "quack-proxy.pid")
+	// Simulate a stale, world-readable pid file left by an older version:
+	// rewriting it must not preserve the old 0644 mode.
+	if err := os.WriteFile(pidFile, []byte("0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePID(pidFile); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("pid file mode = %04o, want 0600", perm)
+	}
+}
+
+// R-18 (r9): the platform policy must be explicit and testable on any host,
+// not buried in a runtime.GOOS check inside runStart.
+func TestRuntimeSupported(t *testing.T) {
+	for _, tc := range []struct {
+		goos string
+		want bool
+	}{
+		{"linux", true},
+		{"darwin", true},
+		{"windows", false},
+	} {
+		if got := runtimeSupported(tc.goos); got != tc.want {
+			t.Errorf("runtimeSupported(%q) = %v, want %v", tc.goos, got, tc.want)
+		}
+	}
+}
+
+func TestWindowsUnsupportedMessageIsActionable(t *testing.T) {
+	for _, want := range []string{"Windows", "not a supported runtime platform", "R-18", "WSL2"} {
+		if !strings.Contains(windowsUnsupportedMessage, want) {
+			t.Errorf("windows message missing %q", want)
 		}
 	}
 }
