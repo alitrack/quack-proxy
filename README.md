@@ -25,6 +25,31 @@ quack-proxy does all of this with a single YAML and a single binary.
 
 ---
 
+## Where It Sits
+
+DuckLake's own manifesto deliberately leaves out the serving layer — concurrent
+users, authentication, authorization, and connection routing. Several projects
+now fill that gap; quack-proxy occupies the **minimal** end of it:
+
+| | [QoD](https://github.com/starlake-ai/qod) | [azure-ducklake-quack](https://github.com/MiguelElGallo/azure-ducklake-quack) | quack-proxy |
+|---|---|---|---|
+| Form | Python gateway + control-plane Postgres | Rust gateway, Azure-only (Easy Auth / Entra / Bicep) | **Go single binary, no external services** |
+| Auth | Pluggable DB / JWT / OIDC / SCIM | Azure Entra groups only | Engine-side hooks (`init_sql` → any authn/authz you can express in SQL) |
+| RBAC | Table/row/column, enforced on the bound plan, always-on | 2 connection roles (reader/writer) | Your policy, in the engine — e.g. [duckdb-luajit](https://github.com/alitrack/duckdb-luajit) RBAC with default-deny |
+| Target | Multi-tenant warehouse platform | Azure-native deployment | Minimal Quack service / shard supervisor |
+
+If you need multi-tenant billing, BI-tool JDBC access, or agent branch-and-merge
+workflows, use QoD. If you need one static binary supervising a handful of
+DuckDB files with auth enforced *inside the engine* rather than by a proxy-side
+regex, quack-proxy is that.
+
+> Proxy-side SQL filtering is bypassable (DuckDB's own security notes call out
+> `WITH x AS (SELECT 1) INSERT ...` style bypasses against text matching).
+> Engine-side hooks judge every statement the server actually executes, which
+> is why quack-proxy ships RBAC as `init_sql` instead of a built-in ACL.
+
+---
+
 ## Quick Start
 
 ### One-Click (No Go install needed)
