@@ -225,6 +225,30 @@ func buildStatus(sf *supervisor.StatusFile, showTokens bool) statusJSON {
 	return out
 }
 
+// tokenPersistenceNotice returns the stderr explanation for a --show-tokens
+// request on a status file that carries no persisted credentials. Keeping it
+// a pure function lets the CLI regression suite assert that the operator is
+// told WHY the field is empty (and how to opt back in), rather than seeing a
+// silent blank that looks like a broken command.
+func tokenPersistenceNotice(sf *supervisor.StatusFile, showTokens bool) string {
+	if !showTokens {
+		return ""
+	}
+	missing := 0
+	for _, r := range sf.Shards {
+		if r.Token == "" {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"quack-proxy: %d shard token(s) are not persisted (global.persist_tokens is false by default, PRD §4.2). "+
+			"Set an explicit token in the config to manage it yourself, or set global.persist_tokens: true to allow 0600-persisted tokens in status.json.\n",
+		missing)
+}
+
 func runStatus(cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -245,6 +269,13 @@ func runStatus(cfgPath string) {
 		case "--show-tokens":
 			showTokens = true
 		}
+	}
+	// PRD §4.2: with the default global.persist_tokens=false the status file
+	// carries no tokens at all. --show-tokens then has nothing to reveal; say
+	// so on stderr (never inside the JSON stream) instead of silently
+	// returning empty strings that look like a broken command.
+	if notice := tokenPersistenceNotice(sf, showTokens); notice != "" {
+		fmt.Fprint(os.Stderr, notice)
 	}
 	out := buildStatus(sf, showTokens)
 	if jsonFlag {

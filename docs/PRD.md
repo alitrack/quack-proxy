@@ -2,7 +2,7 @@
 
 > Product Requirements Document | 原始稿 v0.1 | 2026-05-29
 > Author: alitrack
-> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-16（r13：CI 门禁契约机器可验证，见下表「CI 门禁契约」；r12 引擎原生 TLS 能力实证见「内建 TLS 能力边界」与 §4.1）
+> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-16（**r14：执行 §4.2 既有修订要求 —— token 默认不落盘 + 显式开关**，见下表「Token 安全模型」；r13：CI 门禁契约机器可验证，见「CI 门禁契约」；r12 引擎原生 TLS 能力实证见「内建 TLS 能力边界」与 §4.1）
 >
 > **本文不再作为愿景稿使用。** 原始 v0.1 内容保留作背景，但所有功能声明必须对照下表与 `docs/SCOPE.md`。凡标记「未实现 / 已放弃」的条目，README 不得再作为既有能力宣传。边界与成功判据以 `SCOPE.md` 为准，缺陷与整改进度以 `REMEDIATION.md` 为准。
 
@@ -31,7 +31,8 @@
 | 生成的 HAProxy 配置以 root 运行 | — | **已补齐可验证加固路径（默认 opt-in）** | r6 发现真实 HAProxy 3.4.7 启动告警；r7 新增 `proxy.hardened: true` 输出生效的 `chroot` / `user` / `group`，`scripts/verify-hardening.sh` 预置账号目录并用真实 HAProxy 验证降权 + 转发（3.4.7 3/3、2.8.31 1/1）。默认仍为 false：负例证明注入未预置主机会让 HAProxy 拒绝启动（R-23） |
 | 非 root systemd 安装演练 | §3.3 §6 | **已实机通过（r7）** | `scripts/systemd-install-drill.sh` 在真实 systemd 255 PID 1 安装 shipped unit 并启停，验证账户、`RuntimeDirectory`、0600 文件、healthy、脱敏与全量清理，带「无 RuntimeDirectory 必失败」负例；3/3 通过，CI 必需 job `systemd-drill`。r6 的「环境无 systemd」结论作废 |
 | 漏洞扫描与发布工具链 | — | **已收口（r7）** | `go1.26.11` 的 11 项 stdlib 告警在 `go1.27.4` 下清零；必需 `vuln-scan` job + release 固定 `go1.27.4`；CI 矩阵 1.25 / 1.26 / 1.27（R-14） |
-| LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复** |
+| LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复**；r14 只修了下方独立的「凭据落盘」项，传输风险完全未动 |
+| Token 安全模型（§4.2 修订要求） | §4.2 | **已实现（r14）** | 甲方 2026-11-13 修订要求早已给出三条判据：token 不得明文落盘、`status --json` 默认不输出、确需持久化时 0600 + 显式开关。后两条此前已做，**第一条连标多轮「需甲方拍板」实为「决策早有、缺执行」**。r14 新增 `global.persist_tokens`（默认 `false`）：`status.json` 默认不写 `token` 字段（`omitempty` + 条件赋值），0600 原子写保留；默认模式下省略分片 token 由 `config.Load` 硬拒绝并给出两种修复（显式自带 token / 开启开关），避免生成无法分发的凭据；`--show-tokens` 在 stderr 解释空结果。`plaintext-audit` 改为硬断言 `STATUS_TOKEN_AT_REST=0`，`systemd-drill` 显式开开关以保留脱敏验证并新增拒绝负例。**仍需甲方拍板的是产品接入 TLS，不是本项** |
 | 内建 TLS 能力边界 | §4.1 | **已实证引擎能力（产品仍未启用）** | r12：`scripts/verify-engine-tls.sh` 用 pinned v2.0.0 引擎在 `--network none` 容器内证明 `disable_ssl=false` → `https://`、TLSv1.3 握手、`quack_generate_keys()` 自签证书与客户端 `ssl_fingerprint` 校验全链路可用。`supervisor.go` 硬编码 `disable_ssl=true` 是**产品主动关闭**，不是引擎不支持。更正旧口径「内建 TLS 属需设计决策（隐含能力受限）」：剩余是**产品接线设计决策**（证书/指纹分发、健康探测、status.json 契约、HAProxy），需甲方拍板。必需 CI job `engine-tls-capability` 含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言。**不得据此认为 quack-proxy 已具备 TLS**（R-05） |
 | 真实引擎 E2E 在 CI 的门禁范围 | — | **全部必需（r10）** | r8 曾把 `continue-on-error` 收紧为仅 PR advisory；r10 移除该逃生口。新增 `scripts/prefetch-quack-e2e.sh` + SHA-pinned `actions/cache`，把 pinned CLI / `quack` / `httpfs` 做成离线缓存；测试进程 `QUACK_E2E_OFFLINE=1` 严格离线，缓存缺失即硬失败。**PR 也为必需**。如实保留：首次 cache miss 仍需 runner 访问上游一次 |
 | CI 门禁契约 | — | **已机器可验证（r13）** | `internal/cicontract` 随已必需的 `go test ./...` 解析真实 `ci.yml` / `release.yml`，断言 9 个门禁齐全、无 `continue-on-error` / 无 job 级 `if`、全部 `uses:` 为 40 位 hex SHA、两个共享缓存步骤 `path`/`key` 一致且 key 含三个 pin 前缀、`engine-tls-capability` 的 `needs` 含 `quack-e2e`、离线开关齐全；9 个单点篡改负例保证断言非空转。三段链路在单个 `--network none` 容器按 CI 顺序 3/3 RC=0。**不是第 10 个门禁**、不改产品行为、**不消除** r10 的首次 cache miss 依赖 |
@@ -192,7 +193,9 @@ shards:
   - name: orders_2024           # 逻辑名称
     database: /data/orders_2024.db
     port: 9491                  # 可选，自动分配
-    token: ""                   # 可选，空则自动生成（crypto-random，32 字符）
+    token: ""                   # 原始稿：可选，空则自动生成（crypto-random，32 字符）
+                                # r14 更正：默认 persist_tokens:false 下此写法会被
+                                # config.Load 拒绝，必须显式给值；见 §4.2 修订要求
 
   - name: orders_2025
     database: /data/orders_2025.db
@@ -214,14 +217,29 @@ proxy:
 
 > **实现状态**：`proxy.ssl` 在 `internal/config/config.go` 中定义，但 `internal/proxy/haproxy.go` 与 supervisor 均未读取；同时 `supervisor.go` 硬编码 `disable_ssl=true`。该配置项当前**完全无效**，不得据此认为启用了 TLS。见 R-05。
 >
-> **r12 补充（影响甲方决策）**：这里的 `disable_ssl=true` 不是引擎能力限制。pinned DuckDB v2.0.0 的 Quack 扩展原生支持 HTTPS（`disable_ssl=false` + `ssl_cert_file`/`ssl_key_file` + 客户端 `ssl_fingerprint`），已由 `scripts/verify-engine-tls.sh` 在严格离线容器内实证（TLSv1.3 握手 + 指纹校验 + 4 个负例）。因此「是否启用 TLS」不是「能否实现」，而是产品接线与运维契约的设计决策：证书生命周期与私钥存放、向客户端分发/轮换 SHA256 指纹的通道、健康探测改 HTTPS、`status.json` 的 `attach_sql`/token 契约、`gen-proxy` 输出的 HAProxy 前端与 `proxy.ssl` 死配置。本轮不改产品行为，R-05 仍开放。
+> **r12 补充（影响甲方决策）**：这里的 `disable_ssl=true` 不是引擎能力限制。pinned DuckDB v2.0.0 的 Quack 扩展原生支持 HTTPS（`disable_ssl=false` + `ssl_cert_file`/`ssl_key_file` + 客户端 `ssl_fingerprint`），已由 `scripts/verify-engine-tls.sh` 在严格离线容器内实证（TLSv1.3 握手 + 指纹校验 + 4 个负例）。因此「是否启用 TLS」不是「能否实现」，而是产品接线与运维契约的设计决策：证书生命周期与私钥存放、向客户端分发/轮换 SHA256 指纹的通道、健康探测改 HTTPS、`status.json` 的 `attach_sql` 契约（`status.json` 的 **token 契约已由 r14 定案**：默认不落盘 + 显式开关，不再需要拍板）、`gen-proxy` 输出的 HAProxy 前端与 `proxy.ssl` 死配置。**r12 本轮不改产品行为**（r14 才改了 token 落盘行为）；R-05 现只剩「产品接入 TLS」开放。
 
 ### 4.2 Token 安全模型
+
+> 以下前三条是 **v0.1 原始稿**；**r14 起以实现状态为准**，见「当前实现」。
 
 - 未指定 token → 启动时用 `crypto/rand` 生成 32 字符密码学安全 token，写入 `status.json`
 - 指定 token → 使用指定值
 - 生产环境建议：Nginx 反向代理做 SSL termination + 固定 token
 - **2026-11-13 修订要求**：token 不得明文落盘；`status --json` 默认不输出；确需持久化时 0600 + 显式开关。见 `SCOPE.md` §5
+
+**当前实现（r14，修订要求已执行完毕）**：
+
+| 判据 | 状态 | 实现 |
+|------|------|------|
+| token 不得明文落盘 | **已实现** | `global.persist_tokens` 默认 `false`；`StatusFileRecord.Token` 改 `omitempty`，`buildStatusLocked()` 仅在开关开启时赋值；`status.json` 默认连 `token` 字段都没有 |
+| `status --json` 默认不输出 | 已实现（此前） | `buildStatus(sf, false)` 脱敏；需 `--show-tokens` |
+| 确需持久化时 0600 + 显式开关 | **已实现** | 仅 `global.persist_tokens: true` 恢复自动生成 + 落盘；`writeStatusAtomically` 仍 0600 原子写 |
+
+- **默认模式的配套约束**：因不落盘时自动生成的凭据无处分发，`config.Load` 会拒绝任何省略 token 的分片，并提示「显式给 token（推荐，运维自管密钥）」或「开启 `persist_tokens: true`」。沿用 `proxy.ssl.enabled` 的 fail-closed 模式。
+- `--show-tokens` 在无持久化凭据时由 `tokenPersistenceNotice` 在 **stderr** 解释原因与两种选择，不污染 JSON 输出。
+- 示例配置与 README Quick Start 已改为显式 token；照抄旧示例会（正确地）在加载期失败。
+- **边界**：本项只修「凭据落盘」，**不修明文传输**（R-05 的 `disable_ssl=true` 与 LAN 抓包结论完全不变）。
 
 ---
 

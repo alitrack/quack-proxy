@@ -26,6 +26,7 @@ shards:
     token: secret123
   - name: shard2
     database: ` + dbPath + `
+    token: secret456
 `
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
@@ -77,6 +78,7 @@ func TestDefaults(t *testing.T) {
 shards:
   - name: s1
     database: ` + dbPath + `
+    token: explicit-token
 `
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
@@ -275,7 +277,8 @@ listener:
   health_expect: "quack-greeting"
 shards:
   - name: s1
-    database: ` + dbPath,
+    database: ` + dbPath + `
+    token: explicit-token`,
 			wantErr: "",
 		},
 		{
@@ -327,7 +330,7 @@ func TestNewDatabaseAccepted(t *testing.T) {
 	}
 	// The file deliberately does NOT exist; only its directory does.
 	newDB := filepath.Join(dataDir, "brand-new.db")
-	yaml := "shards:\n  - name: s1\n    database: " + newDB
+	yaml := "shards:\n  - name: s1\n    database: " + newDB + "\n    token: explicit-token"
 	cfgPath := filepath.Join(tmp, "config.yaml")
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
@@ -349,6 +352,7 @@ func TestProxyDefaults(t *testing.T) {
 shards:
   - name: s1
     database: ` + dbPath + `
+    token: explicit-token
 proxy:
   enabled: true
   output: /tmp/haproxy.cfg

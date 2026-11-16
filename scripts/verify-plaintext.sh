@@ -4,7 +4,11 @@
 # This is an AUDIT, not a fix. It proves, with a real AF_PACKET capture, that
 # when a shard is exposed on a LAN interface (listener.bind_host: 0.0.0.0)
 # the shard token travels in cleartext: quack-proxy hardcodes disable_ssl=true
-# and has no TLS termination. A TLS control channel on the same L2 segment
+# and has no TLS termination. Since r14 it ALSO asserts the separate PRD §4.2
+# fix: the same token must NOT be written to status.json by default (an
+# explicit global.persist_tokens: true is the only opt-in, covered by Go
+# tests). Transport is still an open weakness; credential-at-rest is not.
+# A TLS control channel on the same L2 segment
 # carries a second canary that must NOT appear in the capture - that negative
 # control proves the sniffer really parses wire payloads and is not just a
 # grep over a log file. A third check uses the real CLI to confirm that
@@ -350,14 +354,25 @@ echo "PRODUCT_TLS_UNAVAILABLE=1 (real CLI refuses ssl.enabled=true: $(tail -1 "$
 MODE="$(docker exec "$SRV" python3 -c \
   "import os,stat; print('%o' % stat.S_IMODE(os.stat('/tmp/qp-plain/status.json').st_mode))")"
 [[ "$MODE" = "600" ]] || fail "status.json mode is ${MODE}, expected 600"
+# PRD §4.2 (r14): the credential must NOT be on disk by default. These are
+# HARD assertions, not informational echoes: if a future change starts
+# persisting tokens again without the explicit opt-in, this required gate
+# must fail. The opt-in path (persist_tokens: true, still 0600) is covered by
+# internal/supervisor/r14_token_at_rest_test.go in the required Go suite.
 if docker exec "$SRV" python3 -c \
     "import sys; sys.exit(0 if '${TOKEN}' in open('/tmp/qp-plain/status.json').read() else 1)"; then
-  echo "STATUS_TOKEN_AT_REST=1 (plaintext token on disk, protected only by mode ${MODE})"
-else
-  echo "STATUS_TOKEN_AT_REST=0 (token no longer persisted; update R-05 docs)"
+  fail "status.json still contains the shard token in cleartext by default (PRD §4.2 / R-05 regression)"
 fi
+if docker exec "$SRV" python3 -c \
+    "import json,sys; sys.exit(0 if 'token' in json.load(open('/tmp/qp-plain/status.json'))['shards'][0] else 1)"; then
+  fail "status.json exposes a token field by default; global.persist_tokens must be an explicit opt-in"
+fi
+echo "STATUS_TOKEN_AT_REST=0 (default: no token on disk; file still mode ${MODE})"
 
 echo
 echo "PLAINTEXT_AUDIT_PASSED"
-echo "  This is evidence of a KNOWN weakness, not a fix. Do not expose a shard on"
-echo "  an untrusted LAN without terminating TLS in an external proxy. See docs/SECURITY.md R-05."
+echo "  TRANSPORT is still a known weakness, not a fix: token, Bearer header and"
+echo "  SQL body are visible on the wire. Do not expose a shard on an untrusted"
+echo "  LAN without terminating TLS in an external proxy. See docs/SECURITY.md R-05."
+echo "  TOKEN AT REST is fixed by default (PRD §4.2, r14): only an explicit"
+echo "  global.persist_tokens: true opts back into 0600 persistence."

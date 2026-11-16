@@ -119,7 +119,9 @@ func buildBootSQL(bindHost string, cfg config.ShardConfig, token string, allowOt
 
 // StatusFileRecord is one shard entry in the on-disk status file that the
 // daemon writes so out-of-process commands (status, gen-proxy) can read live
-// cluster state and — critically — the auto-generated tokens.
+// cluster state. Token is present ONLY when global.persist_tokens is true
+// (PRD §4.2): by default no shard credential is written to disk at all, and
+// omitempty keeps even the empty field out of the JSON.
 type StatusFileRecord struct {
 	Name      string `json:"name"`
 	Port      int    `json:"port"`
@@ -127,7 +129,7 @@ type StatusFileRecord struct {
 	PID       int    `json:"pid"`
 	StartTime string `json:"start_time"`
 	Restarts  int    `json:"restarts"`
-	Token     string `json:"token"`
+	Token     string `json:"token,omitempty"`
 	Database  string `json:"database"`
 	LastCheck string `json:"last_health_check,omitempty"`
 	AttachSQL string `json:"coordinator_attach_sql"`
@@ -408,9 +410,14 @@ func (s *Supervisor) buildStatusLocked() StatusFile {
 			Status:    sp.Status,
 			PID:       sp.PID,
 			Restarts:  sp.Restarts,
-			Token:     sp.Config.Token,
 			Database:  sp.Config.Database,
 			StartTime: sp.StartTime.Format(time.RFC3339),
+		}
+		// PRD §4.2 / R-05: credentials are off-disk by default. Only an
+		// explicit opt-in re-enables the legacy status.json token channel,
+		// still protected by the 0600 atomic write below.
+		if s.cfg.Global.PersistTokens {
+			rec.Token = sp.Config.Token
 		}
 		if !sp.lastCheck.IsZero() {
 			rec.LastCheck = sp.lastCheck.Format(time.RFC3339)

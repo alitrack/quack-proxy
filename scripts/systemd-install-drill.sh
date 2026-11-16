@@ -149,6 +149,10 @@ cat > "$CONF" <<YAML
 global:
   log_level: info
   duckdb_bin: $DEST_STUB
+  # PRD §4.2 (r14): this drill verifies --show-tokens redaction, which needs
+  # a token IN status.json. Opt in explicitly. The DEFAULT (off) is verified
+  # by the negative control below and by the required Go suite.
+  persist_tokens: true
 listener:
   bind_host: 127.0.0.1
   health_path: /
@@ -181,6 +185,37 @@ grep -qiE 'permission denied|failed to write pid|mkdir|read-only' "$WORK/negativ
 }
 [[ ! -d "$RUNTIME_DIR" ]] || fail "negative control left a runtime directory behind"
 echo "SYSTEMD_DRILL_NEGATIVE_CONTROL_OK=1 (unprivileged start refused: $(head -1 "$WORK/negative.log"))"
+
+# ---- r14 negative control: no cleartext token on disk by default ------------
+# PRD §4.2: with global.persist_tokens false (the default), a config that
+# omits the shard token must be REFUSED by the shipped binary. Otherwise the
+# daemon would generate a credential it can no longer distribute, leaving a
+# shard nobody can authenticate to. This exercises config.Load in the real
+# CLI, not a Go unit test; the main drill config above opts in explicitly.
+log "negative control: default config with an auto-generated token is refused"
+cat > "$WORK/nopersist.yaml" <<YAML
+global:
+  duckdb_bin: $DEST_STUB
+  pid_file: $RUNTIME_DIR/quack-proxy.pid
+  status_file: $RUNTIME_DIR/status.json
+listener:
+  bind_host: 127.0.0.1
+shards:
+  - name: drill
+    database: $WORK/no-token.db
+    port: $((PORT + 1))
+YAML
+NP_RC=0
+"$DEST_BIN" start -c "$WORK/nopersist.yaml" > "$WORK/nopersist.log" 2>&1 || NP_RC=$?
+if [[ "$NP_RC" -eq 0 ]]; then
+  cat "$WORK/nopersist.log" >&2
+  fail "default config with no explicit token was accepted (PRD §4.2 regression)"
+fi
+grep -q "persist_tokens" "$WORK/nopersist.log" || {
+  cat "$WORK/nopersist.log" >&2
+  fail "default-token rejection failed for an unexpected reason"
+}
+echo "TOKEN_PERSIST_DEFAULT_REJECTED=1 (real CLI refuses an undistributable token)"
 
 # ---- positive: real systemd start -------------------------------------------
 log "installing $UNIT_NAME.service and starting it via systemctl"

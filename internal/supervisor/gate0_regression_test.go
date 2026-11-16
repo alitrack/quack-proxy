@@ -144,8 +144,10 @@ func TestGate0StatusFileIsPrivateAndComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status file is not valid JSON: %v", err)
 	}
-	if len(sf.Shards) != 1 || sf.Shards[0].Token != "test-token" {
-		t.Errorf("status file content incomplete: %+v", sf.Shards)
+	// PRD §4.2 (r14): the credential is deliberately absent by default.
+	// The explicit-opt-in path is covered by r14_token_at_rest_test.go.
+	if len(sf.Shards) != 1 || sf.Shards[0].Token != "" {
+		t.Errorf("status file persisted a token without global.persist_tokens: %+v", sf.Shards)
 	}
 	if !strings.Contains(sf.Shards[0].AttachSQL, "127.0.0.1") {
 		t.Errorf("status AttachSQL is not dialable: %q", sf.Shards[0].AttachSQL)

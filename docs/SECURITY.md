@@ -1,6 +1,6 @@
 # 安全说明（SECURITY）
 
-> 适用版本：v0.2.0 + 本次整改补丁（2026-11-16，r13）
+> 适用版本：v0.2.0 + 本次整改补丁（2026-11-16，r14）
 > 配套阅读：`SCOPE.md`（边界）、`REMEDIATION.md`（缺陷台账与状态）
 
 ## 1. 信任模型
@@ -20,7 +20,8 @@
 - `listener.allow_other_hostname` 默认 `false`
 - `global.allow_unsigned_extensions` 默认 `false`
 - `status --json` 默认不输出 token；显式 `--show-tokens` 才输出
-- status.json / pid 文件 `0600`、临时文件 + rename 原子写，目录权限收紧
+- **status.json 默认完全不含 token（r14 / PRD §4.2）**：`global.persist_tokens` 默认 `false`，`token` 字段为 `omitempty` 且仅在开关开启时赋值；只有显式 `true` 才写入自动生成的凭据。默认模式下省略分片 token 会在配置加载期被**拒绝**（凭据不落盘就无处分发），运维须自带 token；`--show-tokens` 会在 stderr 解释空结果
+- status.json / pid 文件 `0600`、临时文件 + rename 原子写，目录权限收紧（开关开启时 status.json 仍是 0600）
 - `shards[].name` 限 `^[A-Za-z_][A-Za-z0-9_]*$`；`health_path` 限纯绝对路径；`bind_host` 限主机名/IP 字符
 - 健康检查不跟随 3xx、URL 结构化构造、复用连接池、限流读 body
 - `listener.health_expect` 可选：要求响应 body 含指定子串（v2.0.0 推荐 `"This is a DuckDB Quack RPC endpoint"`），防止「任意 2xx 服务占端口」被误判为健康
@@ -31,12 +32,12 @@
 - 供应链：Actions 全 SHA pin、`govulncheck@v1.9.0` 版本 pin 且为**必需**门禁、release 产物 cosign 签名、DuckDB CLI SHA256 pin
 - 发布二进制固定用 **go1.27.4**（或更新的已修补工具链）构建：`go1.26.11` 实测有 11 项 Go 标准库告警，`go1.27.4` 实测 `No vulnerabilities found`
 - 部署产物经真实二进制校验：`haproxy -c -f`、`systemd-analyze verify`、systemd 实机安装演练、HAProxy 降权加固验证（均为必需 CI job）
-- LAN 明文风险由 `plaintext-audit` 必需 job 用真实抓包守住（证明弱点存在，防止文档悄悄宣称已有 TLS）
+- LAN 明文风险由 `plaintext-audit` 必需 job 用真实抓包守住（证明弱点存在，防止文档悄悄宣称已有 TLS）；**r14 起同一 job 还硬断言 `status.json` 默认不含 token**（`STATUS_TOKEN_AT_REST=0`，连空 `token` 字段都拒绝）
 
 ## 3. 仍然存在的风险（不得忽略）
 
-1. **明文传输（r8 已实证，r12 已厘清能力边界，风险未修）**：Quack 端点硬编码 `disable_ssl = true`。默认只监听环回；一旦改成 `0.0.0.0`，LAN 内抓包即可拿到唯一凭据。**r12 更正**：这不是引擎不支持 TLS —— 用同一套 pinned v2.0.0 引擎，`scripts/verify-engine-tls.sh` 实证 `disable_ssl := false` 可起 `https://` 端点、完成 TLSv1.3 握手、并用 `ssl_fingerprint` 校验客户端；是产品主动关掉了引擎已有的能力。但**引擎支持 ≠ 产品已启用**：daemon 仍只提供明文 HTTP，本风险完全未修，见第 12 条。`scripts/verify-plaintext.sh` 用真实 daemon + 独立嗅探容器（`AF_PACKET` 原始帧）证明：token、`Authorization: Bearer` 与 SQL 正文全部出现在 TCP payload 中；同一 L2 网段的 TLS 控制通道不泄漏 canary；真实 CLI 拒绝 `proxy.ssl.enabled=true`（`not implemented`）。默认镜像 3/3 通过，已落为必需 CI job `plaintext-audit`。**该门禁断言的是当前已知弱点，不是修复**；若将来加入 TLS 终止，它会（正确地）失败，需同步更新断言与本文档。
-2. **凭据仍落盘**：status.json 内含所有分片 token，靠 0600 保护。`status` 的脱敏只防「随手打印」，不防本机其他进程读文件。更彻底的方案是不落盘 + 由用户自带 token（需设计决策）。
+1. **明文传输（r8 已实证，r12 已厘清能力边界，风险未修）**：Quack 端点硬编码 `disable_ssl = true`。默认只监听环回；一旦改成 `0.0.0.0`，LAN 内抓包即可拿到唯一凭据。**r12 更正**：这不是引擎不支持 TLS —— 用同一套 pinned v2.0.0 引擎，`scripts/verify-engine-tls.sh` 实证 `disable_ssl := false` 可起 `https://` 端点、完成 TLSv1.3 握手、并用 `ssl_fingerprint` 校验客户端；是产品主动关掉了引擎已有的能力。但**引擎支持 ≠ 产品已启用**：daemon 仍只提供明文 HTTP，本风险完全未修，见第 12 条。`scripts/verify-plaintext.sh` 用真实 daemon + 独立嗅探容器（`AF_PACKET` 原始帧）证明：token、`Authorization: Bearer` 与 SQL 正文全部出现在 TCP payload 中；同一 L2 网段的 TLS 控制通道不泄漏 canary；真实 CLI 拒绝 `proxy.ssl.enabled=true`（`not implemented`）。默认镜像 3/3 通过，已落为必需 CI job `plaintext-audit`。**该门禁的传输部分断言的是当前已知弱点，不是修复**；若将来加入 TLS 终止，它会（正确地）失败，需同步更新断言与本文档。**r14 补充**：同一门禁的 token-at-rest 部分断言的是**已完成的修复**（`STATUS_TOKEN_AT_REST=0`），两者不可混为一谈 —— 明文传输依然完全未修。
+2. **凭据落盘已默认关闭（r14），但显式开关仍在**：`status.json` 默认不含任何 token，PRD §4.2 的甲方修订要求已执行完毕。仅当显式设置 `global.persist_tokens: true` 时才恢复「32 字符 crypto-random 凭据以 0600 落盘」，此时本机同 UID / root 仍可读，`status` 的脱敏只防「随手打印」。默认模式下运维必须**自带 token**：配置文件本身是明文，密钥保管责任转移给运维自己的 secret store，这是显式的运维选择，**不是 quack-proxy 提供的密钥管理**。误开开关不会静默发生 —— `plaintext-audit` 的硬断言会让 CI 立刻变红；`systemd-drill` 另用真实 CLI 验证「默认配置省略 token 被拒绝」。
 3. **健康检查不是协议握手**：默认只判 2xx；配置 `health_expect` 后变为「响应 body 子串校验」，仍不等价于 Quack 握手或 token 验证。
 4. **daemon 是单点**：无控制面冗余、无自动接管，`systemd` 单元显式 `Restart=no`（R-01）。
 5. **停机无 `CHECKPOINT`**：DuckDB CLI 阻塞在 `quack_serve`，没有 admin 通道可注入 SQL；SIGKILL 兜底依赖 WAL 恢复（R-12）。R-21 的整组 SIGKILL 使这条路径更常被调用，备份/快照不应依赖优雅落盘。
@@ -52,8 +53,8 @@
 
    脚本会断言：未预置账号时 `haproxy -c -f` 拒绝配置；未加固配置在 HAProxy ≥ 3.x 启动时确实告警；加固配置启动后 `/proc/<pid>/status` 的 real uid 是 `haproxy`、没有 root 告警，且前端仍能真实转发流量。实测 HAProxy **3.4.7** 与 **2.8.31** 均通过（2.8 无 3.x 的告警文案，该负例按主版本自动跳过并明确打印 SKIPPED）。默认输出仍保持三条指令为注释，保证未加固主机可用。
 
-11. **VIP / 浮动 IP 不会带来数据高可用（r11 实证）**：`scripts/verify-vip-failover.sh` 在 Docker bridge 上把真实 `/32` 地址从节点 A 漂移到 B，证明 `gen-proxy` 生成的配置经得起入口切换（必需 CI job `vip-failover`）。但 **VIP 的移动由外部编排完成，quack-proxy 既不提供也不感知**；两个节点是各自独立的后端，脚本断言切换后对端身份变化（`SESSION_DISCONTINUITY=1`）——连接能重建，**会话状态与数据不连续**。多分片 VIP 后端仍被 `gen-proxy` 明确拒绝（R-04），明文传输与 token 落盘风险不因 VIP 改变（R-05）。请勿据此宣称「已具备 HA」；真 HA 需另行立项。
-12. **引擎原生 TLS 能力 ≠ quack-proxy 提供 TLS（r12 实证）**：`scripts/verify-engine-tls.sh` 用项目 pin 的 DuckDB v2.0.0 CLI + 签名 `quack` / `httpfs` 扩展，在 `--network none` 容器内证明引擎原生支持 TLS：`quack_serve(disable_ssl := false, ssl_cert_file, ssl_key_file)` 返回 `https://`，独立 `openssl s_client` 完成 TLSv1.3 握手，明文 HTTP 打该端口被拒，`quack_generate_keys()` 生成自签证书与 SHA256 指纹，客户端用正确 `ssl_fingerprint` 经 TLS 查得结果，错误/缺失指纹与错误 token 均被拒（必需 CI job `engine-tls-capability`，复用 `quack-e2e` 的 pinned 缓存，零新增下载）。**这是引擎能力审计，不是产品修复**：脚本绕过 daemon 直接驱动引擎，产品 `supervisor.go` 仍硬编码 `disable_ssl = true`，R-05 的明文与 token 落盘风险全部仍在。把能力接进产品需甲方决策：证书生命周期与私钥存放、指纹分发/轮换通道（当前 `status.json` / `attach_sql` 无此字段）、健康探测改 HTTPS 后的证书校验、`status.json` 契约、`gen-proxy` 的 HAProxy 前端与 `proxy.ssl` 死配置。**脚本含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言**：产品一旦启用 TLS，此门禁会（正确地）失败，须同步更新本文件、第 1 条、`verify-plaintext.sh` 与台账，不得删除。
+11. **VIP / 浮动 IP 不会带来数据高可用（r11 实证）**：`scripts/verify-vip-failover.sh` 在 Docker bridge 上把真实 `/32` 地址从节点 A 漂移到 B，证明 `gen-proxy` 生成的配置经得起入口切换（必需 CI job `vip-failover`）。但 **VIP 的移动由外部编排完成，quack-proxy 既不提供也不感知**；两个节点是各自独立的后端，脚本断言切换后对端身份变化（`SESSION_DISCONTINUITY=1`）——连接能重建，**会话状态与数据不连续**。多分片 VIP 后端仍被 `gen-proxy` 明确拒绝（R-04）；**明文传输**风险不因 VIP 改变（R-05），token 落盘已由 r14 默认关闭（但显式 `persist_tokens: true` 时仍在，同样不因 VIP 改变）。请勿据此宣称「已具备 HA」；真 HA 需另行立项。
+12. **引擎原生 TLS 能力 ≠ quack-proxy 提供 TLS（r12 实证）**：`scripts/verify-engine-tls.sh` 用项目 pin 的 DuckDB v2.0.0 CLI + 签名 `quack` / `httpfs` 扩展，在 `--network none` 容器内证明引擎原生支持 TLS：`quack_serve(disable_ssl := false, ssl_cert_file, ssl_key_file)` 返回 `https://`，独立 `openssl s_client` 完成 TLSv1.3 握手，明文 HTTP 打该端口被拒，`quack_generate_keys()` 生成自签证书与 SHA256 指纹，客户端用正确 `ssl_fingerprint` 经 TLS 查得结果，错误/缺失指纹与错误 token 均被拒（必需 CI job `engine-tls-capability`，复用 `quack-e2e` 的 pinned 缓存，零新增下载）。**这是引擎能力审计，不是产品修复**：脚本绕过 daemon 直接驱动引擎，产品 `supervisor.go` 仍硬编码 `disable_ssl = true`，**R-05 的明文传输风险仍在**；token 落盘已由 r14 默认关闭（仅显式 `persist_tokens: true` 时存在），两者不可混写。把能力接进产品需甲方决策：证书生命周期与私钥存放、指纹分发/轮换通道（当前 `status.json` / `attach_sql` 无此字段）、健康探测改 HTTPS 后的证书校验、`status.json` 契约、`gen-proxy` 的 HAProxy 前端与 `proxy.ssl` 死配置。**脚本含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言**：产品一旦启用 TLS，此门禁会（正确地）失败，须同步更新本文件、第 1 条、`verify-plaintext.sh` 与台账，不得删除。
 13. **CI 门禁契约是机器可验证的（r13）**：r12 之后 `engine-tls-capability` 与 `quack-e2e` 共享同一份 SHA256-pinned 缓存；若有人改了 pin 却没换 cache key、给某个 job 加 `if` 使其可跳过、把 action 改回 `@v4`、或悄悄加回 `continue-on-error`，原先**没有任何门禁会当场拒绝**（与 r5 `govulncheck` 被吞掉是同一类配置退化）。`internal/cicontract` 在已必需的 `go test ./...` 里解析真实 `ci.yml` / `release.yml`，断言 9 个门禁齐全、无 advisory、全部 `uses:` 为 40 位 hex SHA、两个缓存步骤的 `path`/`key` 完全一致且 key 含三个 pin 前缀、`engine-tls-capability` 的 `needs` 含 `quack-e2e`、离线开关已设置；9 个单点篡改负例要求恰好对应检查失败。三段链路（离线缓存断言 → 真实引擎 E2E → 引擎 TLS 审计）已在单个 `--network none` 容器按 CI 顺序 3/3 RC=0。**边界**：这是配置契约检查，**不是第 10 个必需门禁**，不改产品行为，也**不消除**第 6 条如实保留的「CI 首次 cache miss 仍需上游一次」残余风险与第 1/2 条的 R-05 风险。
 
 ## 4. 需要对外暴露时的最小检查清单

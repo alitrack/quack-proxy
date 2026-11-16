@@ -33,6 +33,8 @@ shards:
 
 Both `.db` files were empty (no pre-loaded data). All tests hit `GET /` — Quack's root endpoint, which returns the RPC greeting string. This tests raw HTTP serving throughput, not SQL query performance.
 
+> **r14 口径**：上面的 YAML 是 2026-11-09 的**历史配置快照**，不是可直接照抄的当前配置。按 PRD §4.2（r14 实现）默认 `global.persist_tokens: false`，每个分片必须显式给 `token`，或显式设置 `global.persist_tokens: true` 才会自动生成并落盘。`GET /` 不经过 token 认证，所以本节的吞吐量数字与 r14 改动无关，**不得**据此宣称做过「开启/关闭 token 持久化后的性能对比」。
+
 ---
 
 ## Test 1: Single Shard Throughput

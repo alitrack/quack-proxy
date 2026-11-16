@@ -2,6 +2,74 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r14 (2026-11-16)
+
+**结论先行**：PRD §4.2 的甲方修订要求（「token 不得明文落盘；`status --json`
+默认不输出；确需持久化时 0600 + 显式开关」）早在 2026-11-13 就给出了三条
+明确判据，`SECURITY.md` 甚至自己写好了方案（「不落盘 + 由用户自带
+token」），但台账连标多轮「需甲方拍板的设计决策」。这是 r9 那种**「决策早有、
+缺执行」的第六种形态**：既不是能力受限，也不是新决策。本轮按既有判据实现，
+**这是真修复，不是审计**。
+
+### Added
+
+- `global.persist_tokens`（默认 `false`）：`status.json` 默认**完全不写**
+  `token` 字段（`json:"token,omitempty"` + 条件赋值），`0600` 原子写保留作
+  纵深防御。只有显式 `true` 才恢复「32 字符 crypto-random token 落盘」。
+- 默认模式下省略分片 token 会在 `config.Load` 期**硬失败**，并给出两种可执行
+  修复：显式给 token（推荐，运维自管密钥），或开 `persist_tokens: true`。
+  理由：不落盘时自动生成的凭据没有任何进程外分发通道，静默启动会造出
+  「谁都连不上」的分片。沿用 `proxy.ssl.enabled` 的 fail-closed 模式。
+- `status --show-tokens` 在无持久化凭据时于 **stderr** 给出解释
+  （`tokenPersistenceNotice`），不污染 JSON 输出，也不让空字符串看起来像
+  命令坏了。
+- `internal/cicontract` 新增 `CheckScriptPins`：把「升级 DuckDB 时同步刷新
+  三组 pin 与 CI cache key」这条纯人工约定，变成随已必需 `go test ./...`
+  运行的机器断言（3 个单点篡改负例 + 未篡改副本的正对照）。
+
+### Changed
+
+- 必需门禁仍是 **9 个**，但 `plaintext-audit` 从「证明 token 落盘」升级为
+  **硬断言默认不落盘**（`STATUS_TOKEN_AT_REST=0`，连空 `token` 字段都不允许）；
+  `systemd-drill` 主配置显式 `persist_tokens: true` 以保留 `--show-tokens`
+  脱敏验证，并新增「默认配置省略 token 被真实 CLI 拒绝」负例。
+- 示例配置、README Quick Start、benchmark 历史配置、PRD 原始 YAML 示例全部
+  改为显式 token 或明确标注为历史快照，避免照抄即失败。
+- 本轮 **Go 源码有改动**（与 r12 / r13 不同）：`internal/config/config.go`、
+  `internal/supervisor/supervisor.go`、`cmd/quack-proxy/main.go`，以及新增 /
+  更新的回归测试。
+
+### 边界（不得读宽）
+
+- **明文传输风险一点都没修**：`disable_ssl = true` 仍硬编码，token /
+  `Authorization: Bearer` / SQL 正文仍在 LAN 上可见；`engine-tls-capability`
+  仍是引擎能力审计。R-05 现在只剩「产品接入 TLS」开放，token 落盘项已关闭。
+- 显式 `persist_tokens: true` 仍是甲方可接受、有 0600 保护的选择，本轮没有
+  删除该能力。真 HA 立项与 r10 首次 cache miss 依赖不变。
+
+### Verification
+
+- `gofmt` / `go vet` / `go test ./... -race -count=1`：**6 包全绿，85 个测试
+  函数**（r13 为 74，本轮 +11：9 个 token 用例 + 2 个 pin 契约用例）；
+  `go tool cover` 总计 **72.8%**（cmd 30.2% / cicontract 79.6% / config
+  94.3% / health 90.9% / proxy 98.3% / supervisor 80.2%）。
+- `internal/cicontract` **12 个负例**全部按预期失败：9 个原 YAML 单点篡改 +
+  3 个脚本 pin 漂移，另有未篡改副本的正对照。
+- 12 个 shell 脚本 `bash -n`、3 份 YAML 用项目自带 `yaml.v3` 实解析
+  （含新增后的 `quack-proxy.example.yaml`）、linux / darwin(amd64+arm64) /
+  windows 交叉构建、`git diff --check` 全通过。
+- **三个实机门禁复跑（最终源码，均为 RC=0）**：`plaintext-audit` →
+  `PLAINTEXT_AUDIT_PASSED`（`PLAINTEXT_TOKEN_VISIBLE=1` 证明**传输弱点仍在**，
+  `STATUS_TOKEN_AT_REST=0` 证明**默认不落盘已生效**，同一脚本里两个方向都被
+  真实断言）；`systemd-drill` → `SYSTEMD_INSTALL_DRILL_PASSED`（真实 systemd
+  255，`SYSTEMD_TOKEN_REDACTION_OK=1` 保留，新增
+  `TOKEN_PERSIST_DEFAULT_REJECTED=1` 负例）；`--network none` 三段链路
+  3/3 `OFFLINE_CI_CHAIN_PASSED`（E2E 50 次 SELECT 279 ms / ~179 qps）。
+  首次明文抓包因 Git Bash 的 MSYS 把容器内 `/work` 路径改写成宿主路径而失败，
+  加 `MSYS_NO_PATHCONV=1` 后通过 —— 属环境参数问题，非代码问题。
+
+---
+
 ## Unreleased — remediation r13 (2026-11-16)
 
 **结论先行**：r12 让 `engine-tls-capability` 依赖 `quack-e2e` 产出的同一个
@@ -80,7 +148,7 @@ pin / cache key / `needs` / 离线开关，没有任何门禁会当场拒绝，�
 
 #### 仍未完成（如实）
 
-- **R-05 产品接线与 token 不落盘**：属需甲方拍板的设计决策（清单见上）。`plaintext-audit` 与 `engine-tls-capability` 都只证明事实、不修风险。
+- **R-05 产品接线与 token 不落盘**：属需甲方拍板的设计决策（清单见上）。`plaintext-audit` 与 `engine-tls-capability` 都只证明事实、不修风险。**〔本段为该轮时点的历史记录：其中「token 不落盘」已由 r14 按 PRD §4.2 既有判据完成，剩下只有「产品接入 TLS」；详见本文件最上方 r14 段。〕**
 - **真 HA**：属新产品立项（control plane 冗余 / 跨机发现 / Coordinator 常驻），需重做含验收标准的 PRD + 架构 RFC。
 - **r10 残余风险**：CI 首次 cache miss 仍需 runner 访问上游一次（带重试、无 advisory 逃生口）；缓存命中后测试进程零网络。
 - **r12 新解除**：「内建 TLS 是否属于能力受限」这一前提已澄清（引擎支持，产品主动关闭）。
@@ -185,7 +253,7 @@ r5~r7 把「LAN 明文抓包」列为未做，从未断言环境不允许——�
   - `PLAINTEXT_TOKEN_VISIBLE=1` —— 原始 TCP payload 中直接读到 `qp-lan-cleartext-token`、`Authorization: Bearer` 与 `SELECT * FROM secrets`；
   - `TLS_CONTROL_HIDDEN=1` —— 同网段 TLS 控制通道捕获 5009 B，但 canary 与分片 token 均不可见（负例，证明嗅探器真的在解析报文而不是 grep 日志）；
   - `PRODUCT_TLS_UNAVAILABLE=1` —— 真实 CLI 拒绝 `proxy.ssl.enabled=true`（`not implemented`）；
-  - `STATUS_TOKEN_AT_REST=1` —— `status.json` mode 600，但 token 明文落盘。
+  - `STATUS_TOKEN_AT_REST=1` —— `status.json` mode 600，但 token 明文落盘。**这是 r8 时点的历史记录；r14 起该断言反转为硬失败条件 `STATUS_TOKEN_AT_REST=0`（默认不落盘），见本文件最上方 r14 段。**
   - 另有「嗅探器失灵 → 捕获文件为空即失败」的隐性负例。默认镜像 `python:3.11-slim` **3/3**、换 `jrei/systemd-ubuntu:24.04` **1/1** `PLAINTEXT_AUDIT_PASSED`。
 - `scripts/drill-stub.go` 新增 `DRILL_STUB_BIND`（默认仍 `127.0.0.1`），仅明文审计设为 `0.0.0.0`；systemd 演练行为不变。
 

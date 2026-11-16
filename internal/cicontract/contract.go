@@ -257,8 +257,9 @@ func CheckOfflineEnv(wf *Workflow) []error {
 	return errs
 }
 
-// Validate runs every contract check against both workflows.
-func Validate(ci, release *Workflow, pinPrefixes []string) []error {
+// Validate runs every contract check against both workflows AND against the
+// shell scripts that declare the pinned engine hashes.
+func Validate(ci, release *Workflow, pinPrefixes []string, repoRoot string) []error {
 	var errs []error
 	errs = append(errs, CheckRequiredGates(ci)...)
 	errs = append(errs, CheckNoAdvisory(ci)...)
@@ -267,6 +268,7 @@ func Validate(ci, release *Workflow, pinPrefixes []string) []error {
 	errs = append(errs, CheckCacheContract(ci, pinPrefixes)...)
 	errs = append(errs, CheckNeedsLinkage(ci)...)
 	errs = append(errs, CheckOfflineEnv(ci)...)
+	errs = append(errs, CheckScriptPins(repoRoot)...)
 	return errs
 }
 
@@ -294,4 +296,86 @@ func PinnedPrefixes(repoRoot string) ([]string, error) {
 		return nil, fmt.Errorf("expected 3 SHA256 pins (CLI/EXT/HTTPFS), found %d", len(out))
 	}
 	return out, nil
+}
+
+// pinnedScripts are the shell scripts that hardcode the DuckDB engine pins.
+// The producer (prefetch-quack-e2e.sh) is the source of truth; quack-e2e.sh
+// and verify-engine-tls.sh consume the very same cache. Before r14 the
+// "keep all three in sync when upgrading DuckDB" rule existed only as prose
+// in REMEDIATION.md — a manual convention, not an invariant.
+var pinnedScripts = []string{
+	"prefetch-quack-e2e.sh",
+	"quack-e2e.sh",
+	"verify-engine-tls.sh",
+}
+
+var scriptConstRE = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*)="([^"]*)"$`)
+
+// scriptPins reads only the constants that describe the pinned engine, so
+// unrelated shell variables cannot create false drift.
+func scriptPins(path string) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, m := range scriptConstRE.FindAllStringSubmatch(string(data), -1) {
+		switch m[1] {
+		case "DUCKDB_VERSION", "CLI_SHA256", "EXT_SHA256", "HTTPFS_SHA256", "EXT_RELPATH":
+			out[m[1]] = m[2]
+		}
+	}
+	return out, nil
+}
+
+// CheckScriptPins asserts every offline gate declares the SAME pinned engine
+// version, extension hashes and extension path as the cache producer, and
+// that the TLS gate's CLI hash matches too. Upgrading DuckDB now requires a
+// single coordinated edit instead of relying on a human remembering to check
+// three scripts plus the CI cache key.
+func CheckScriptPins(repoRoot string) []error {
+	read := func(name string) (map[string]string, error) {
+		return scriptPins(filepath.Join(repoRoot, "scripts", name))
+	}
+	base, err := read(pinnedScripts[0])
+	if err != nil {
+		return []error{err}
+	}
+	producerWide := []string{"DUCKDB_VERSION", "CLI_SHA256", "EXT_SHA256", "HTTPFS_SHA256", "EXT_RELPATH"}
+	for _, k := range producerWide {
+		if base[k] == "" {
+			return []error{fmt.Errorf("%s is missing %s (the cache producer is the source of truth)", pinnedScripts[0], k)}
+		}
+	}
+
+	var errs []error
+	// Every consumer must carry these shared values explicitly.
+	shared := []string{"DUCKDB_VERSION", "EXT_SHA256", "HTTPFS_SHA256", "EXT_RELPATH"}
+	for _, name := range pinnedScripts[1:] {
+		got, err := read(name)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, k := range shared {
+			if got[k] == "" {
+				errs = append(errs, fmt.Errorf("%s is missing %s", name, k))
+				continue
+			}
+			if got[k] != base[k] {
+				errs = append(errs, fmt.Errorf("%s %s=%q != %s %s=%q (pinned engine drift; update all scripts and the CI cache key together)", name, k, got[k], pinnedScripts[0], k, base[k]))
+			}
+		}
+	}
+	// verify-engine-tls.sh additionally hardcodes the CLI hash and must match
+	// the producer exactly (quack-e2e.sh does not use the CLI tarball).
+	tls, err := read("verify-engine-tls.sh")
+	if err != nil {
+		errs = append(errs, err)
+	} else if tls["CLI_SHA256"] == "" {
+		errs = append(errs, fmt.Errorf("verify-engine-tls.sh is missing CLI_SHA256"))
+	} else if tls["CLI_SHA256"] != base["CLI_SHA256"] {
+		errs = append(errs, fmt.Errorf("verify-engine-tls.sh CLI_SHA256=%q != %s CLI_SHA256=%q", tls["CLI_SHA256"], pinnedScripts[0], base["CLI_SHA256"]))
+	}
+	return errs
 }

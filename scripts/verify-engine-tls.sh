@@ -29,10 +29,12 @@
 #      together, do not delete it (same contract as verify-plaintext.sh).
 #
 # Scope limits, stated plainly: this exercises the ENGINE directly, not the
-# quack-proxy daemon. It does NOT mean quack-proxy can terminate TLS, does not
-# change any product behaviour, and does not resolve the cleartext-on-LAN or
-# token-at-rest risks. Those remain open under R-05. Turning this capability
-# into a shipped feature requires an operator-facing design decision.
+# quack-proxy daemon. It does NOT mean quack-proxy can terminate TLS and does
+# not change any product behaviour. It does not resolve the cleartext-on-LAN
+# risk (still open under R-05). The SEPARATE token-at-rest risk was fixed in
+# r14 by global.persist_tokens=false (see verify-plaintext.sh); this script
+# says nothing about it either way. Turning engine TLS into a shipped feature
+# still requires an operator-facing design decision.
 #
 # Supply chain: cache mode is STRICTLY OFFLINE, with no curl, no INSTALL and
 # no CDN fallback. Every artifact is checked against the same SHA256 pins as
@@ -349,5 +351,7 @@ echo "ENGINE_TLS_CAPABILITY_PASSED"
 echo "  Evidence about the PINNED ENGINE ONLY. quack-proxy still serves plaintext"
 echo "  HTTP (disable_ssl=true hardcoded); R-05 remains OPEN. Enabling TLS in the"
 echo "  product requires a design decision on certificates, fingerprint delivery,"
-echo "  health checks, status.json and HAProxy - not an engine implementation."
+echo "  HTTPS health checks, the status.json attach_sql contract and the HAProxy"
+echo "  frontend - not an engine implementation. Token-at-rest was fixed in r14"
+echo "  (global.persist_tokens defaults to false); cleartext transport is NOT."
 echo "  See docs/REMEDIATION.md R-05 and docs/SECURITY.md."

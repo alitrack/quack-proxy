@@ -49,6 +49,7 @@ func checkErrors(ci, release *Workflow, pins []string) map[string][]error {
 		"cache-contract": CheckCacheContract(ci, pins),
 		"needs-linkage":  CheckNeedsLinkage(ci),
 		"offline-env":    CheckOfflineEnv(ci),
+		"script-pins":    CheckScriptPins(repoRoot()),
 	}
 }
 
@@ -62,7 +63,7 @@ func TestCIWorkflowContract(t *testing.T) {
 	}
 	ci := mustParse(t, readFile(t, filepath.Join(".github", "workflows", "ci.yml")))
 	release := mustParse(t, readFile(t, filepath.Join(".github", "workflows", "release.yml")))
-	errs := Validate(ci, release, pins)
+	errs := Validate(ci, release, pins, repoRoot())
 	if len(errs) > 0 {
 		for _, e := range errs {
 			t.Errorf("CI contract violation: %v", e)
@@ -191,5 +192,86 @@ func TestContractRejectsMutations(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestScriptPinsStayInSync(t *testing.T) {
+	if errs := CheckScriptPins(repoRoot()); len(errs) > 0 {
+		for _, e := range errs {
+			t.Errorf("pinned engine drift: %v", e)
+		}
+	}
+}
+
+// copyScriptRepo copies the real pinned scripts into a temporary repo root so
+// negative controls can mutate one constant without touching the checkout.
+func copyScriptRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range pinnedScripts {
+		data, err := os.ReadFile(filepath.Join(repoRoot(), "scripts", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "scripts", name), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestScriptPinDriftIsRejected proves "keep all three scripts and the CI
+// cache key in sync when upgrading DuckDB" is now an enforced invariant
+// rather than a note in REMEDIATION.md.
+func TestScriptPinDriftIsRejected(t *testing.T) {
+	base, err := scriptPins(filepath.Join(repoRoot(), "scripts", pinnedScripts[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := strings.Repeat("0", 64)
+	cases := []struct {
+		name, file, key, replacement string
+	}{
+		{"E2E extension hash drifts from the cache producer", "quack-e2e.sh", "EXT_SHA256", zero},
+		{"TLS gate CLI hash drifts from the cache producer", "verify-engine-tls.sh", "CLI_SHA256", zero},
+		{"engine version drifts only in the TLS gate", "verify-engine-tls.sh", "DUCKDB_VERSION", "v9.9.9"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := copyScriptRepo(t)
+			p := filepath.Join(root, "scripts", tc.file)
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := tc.key + `="` + base[tc.key] + `"`
+			if !strings.Contains(string(data), old) {
+				t.Fatalf("mutation anchor %q not found in %s", old, tc.file)
+			}
+			mutated := strings.Replace(string(data), old, tc.key+`="`+tc.replacement+`"`, 1)
+			if err := os.WriteFile(p, []byte(mutated), 0644); err != nil {
+				t.Fatal(err)
+			}
+			errs := CheckScriptPins(root)
+			if len(errs) == 0 {
+				t.Fatal("CheckScriptPins accepted a drifted pin; the invariant is not enforced")
+			}
+			joined := ""
+			for _, e := range errs {
+				joined += e.Error() + "\n"
+			}
+			for _, want := range []string{tc.file, tc.key} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("error %q must identify %q", joined, want)
+				}
+			}
+		})
+	}
+	// Positive control: an unmodified copy of the same scripts passes.
+	if errs := CheckScriptPins(copyScriptRepo(t)); len(errs) > 0 {
+		t.Fatalf("unmodified script set failed: %v", errs)
 	}
 }

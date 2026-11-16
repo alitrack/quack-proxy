@@ -32,6 +32,14 @@ type GlobalConfig struct {
 	// by default: an unsigned extension can load arbitrary native code, so
 	// only enable it after pre-installing and hash-verifying the extensions.
 	AllowUnsignedExtensions bool `yaml:"allow_unsigned_extensions"`
+	// PersistTokens opts in to writing shard tokens into status.json (0600).
+	// PRD §4.2 (2026-11-13 revision) requires that tokens NOT be persisted
+	// in cleartext by default, and that persistence be behind an explicit
+	// switch. With the switch off every shard must carry an explicit token in
+	// the config: an auto-generated token would otherwise be unrecoverable,
+	// because status.json is the only out-of-process channel the daemon has.
+	// The operator's own config/secret store is then the distribution channel.
+	PersistTokens bool `yaml:"persist_tokens"`
 }
 
 type ListenerConfig struct {
@@ -250,6 +258,25 @@ func (c *Config) Validate() error {
 		ports[s.Port] = true
 		if hasQuoteOrNewline(s.Token) {
 			return fmt.Errorf("shard[%d] (%s): token may not contain a single quote or newline", i, s.Name)
+		}
+	}
+
+	// PRD §4.2: no cleartext token on disk by default. If the operator
+	// declines the explicit persist_tokens switch, an omitted token cannot
+	// be distributed at all (the daemon would generate one and then refuse
+	// to write it anywhere), so fail loud at load time with two actionable
+	// alternatives rather than starting an unreachable shard. This mirrors
+	// the proxy.ssl.enabled fail-closed pattern. Kept AFTER the per-shard
+	// checks so the existing validation error precedence is preserved.
+	if !c.Global.PersistTokens {
+		var missing []string
+		for _, s := range c.Shards {
+			if s.Token == "" {
+				missing = append(missing, s.Name)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("shards without an explicit token (%s) require global.persist_tokens: true: with the default (false) PRD §4.2 forbids persisting credentials in status.json, and an auto-generated token would be unrecoverable; either set an explicit token per shard (recommended) or set global.persist_tokens: true to allow 0600-persisted auto-generated tokens", strings.Join(missing, ", "))
 		}
 	}
 

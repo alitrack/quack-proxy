@@ -191,6 +191,33 @@ func TestBuildStatusRedactsTokens(t *testing.T) {
 	}
 }
 
+// PRD §4.2 (r14): --show-tokens on a status file with no persisted tokens
+// must explain the empty result instead of silently printing blanks.
+func TestTokenPersistenceNotice(t *testing.T) {
+	noTokens := &supervisor.StatusFile{Shards: []supervisor.StatusFileRecord{
+		{Name: "s1", Port: 9491, Status: "healthy"},
+	}}
+	if got := tokenPersistenceNotice(noTokens, false); got != "" {
+		t.Errorf("default status must not print a notice: %q", got)
+	}
+	notice := tokenPersistenceNotice(noTokens, true)
+	for _, want := range []string{"1 shard token(s)", "persist_tokens", "explicit token"} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("notice %q must mention %q", notice, want)
+		}
+	}
+	shown := buildStatus(noTokens, true)
+	if shown.Shards[0].Token != "" {
+		t.Errorf("--show-tokens must not invent a credential: %+v", shown.Shards)
+	}
+	withTokens := &supervisor.StatusFile{Shards: []supervisor.StatusFileRecord{
+		{Name: "s1", Token: "SUPER-SECRET"},
+	}}
+	if got := tokenPersistenceNotice(withTokens, true); got != "" {
+		t.Errorf("opt-in status file has tokens; no notice expected, got %q", got)
+	}
+}
+
 func TestWritePIDIsPrivate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX permission bits are not enforced on Windows")

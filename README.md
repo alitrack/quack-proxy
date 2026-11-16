@@ -8,7 +8,7 @@
 
 > One YAML, one command. Start and supervise multiple DuckDB + Quack endpoints on a single host.
 
-> **Status (2026-11-16, remediation r13):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All nine CI gates are required (no advisory left), including a strictly-offline real-engine E2E, a real HAProxy + floating-IP drill, and an engine TLS capability audit. **The VIP drill is NOT an HA feature**: the address is moved by the drill (standing in for keepalived / a cloud floating IP); after failover the client reaches a different backend (`SESSION_DISCONTINUITY=1`), so sessions and data do not survive. **The TLS audit proves the pinned DuckDB engine CAN serve HTTPS; quack-proxy still serves plaintext HTTP** and still writes the token to `status.json` (R-05 is open). **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
+> **Status (2026-11-16, remediation r14):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All nine CI gates are required (no advisory left), including a strictly-offline real-engine E2E, a real HAProxy + floating-IP drill, and an engine TLS capability audit. **The VIP drill is NOT an HA feature**: the address is moved by the drill (standing in for keepalived / a cloud floating IP); after failover the client reaches a different backend (`SESSION_DISCONTINUITY=1`), so sessions and data do not survive. **The TLS audit proves the pinned DuckDB engine CAN serve HTTPS; quack-proxy still serves plaintext HTTP** and R-05 remains open for TLS wiring. **Token-at-rest was fixed in r14**: `status.json` no longer carries any token by default (`global.persist_tokens: false`); only an explicit opt-in restores 0600-persisted auto-generated tokens, and with the default off every shard must supply its own token. **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
 
 **quack-proxy** is a lightweight Go daemon that manages multiple DuckDB+[Quack](https://duckdb.org/docs/stable/extensions/quack.html) child processes with built-in health checks, automatic restart, and HAProxy config generation. Think of it as the "systemd for DuckDB Quack endpoints" — except you configure it in one YAML file and it handles everything. It does **not** provide control-plane redundancy, automatic failover, or a unified query endpoint.
 
@@ -70,10 +70,20 @@ listener:
 shards:
   - name: analytics
     database: ./data/analytics.db
+    token: replace-with-your-own-secret   # required by default (PRD §4.2)
 
   - name: logs
     database: ./data/logs.db
+    token: replace-with-another-secret
 ```
+
+**Tokens are required by default.** PRD §4.2 (implemented in r14) keeps shard
+credentials off disk: `status.json` contains no `token` field unless you
+explicitly set `global.persist_tokens: true` (which restores the legacy
+32-character auto-generated token, persisted with mode 0600). With the default
+off, an omitted token cannot be generated *and* distributed, so config loading
+fails loud instead of starting a shard nobody can authenticate to. Manage the
+tokens in your own secret store.
 
 Create the data directory — the `.db` files **do not** need to exist (DuckDB
 creates a fresh database for each on first open), but their **parent
@@ -515,16 +525,21 @@ pinned to a full commit SHA; release binaries are built with the same patched
 `go1.27.4` toolchain the vulnerability gate checks, and release checksums are
 signed with cosign keyless OIDC (see [SECURITY.md](docs/SECURITY.md)).
 
-**The gate contract is itself tested (r13):** `internal/cicontract` parses the
-real `ci.yml` / `release.yml` inside the already-required `go test ./...` job
-and asserts that all nine gates exist, none can be skipped (`if`) or fail
-silently (`continue-on-error`), every action is SHA-pinned, both consumers of
-the pinned engine cache use the **identical path and key** (with the key still
-carrying the three SHA256 pin prefixes read from `prefetch-quack-e2e.sh`),
-`engine-tls-capability` waits for `quack-e2e`, and the offline switches are
-set. Nine negative controls mutate the real YAML one property at a time and
-require **exactly** the intended check to fail — so this is a live contract,
-not a comment. It adds no CI job and no downloads. The full CI chain
+**The gate contract is itself tested (r13, extended in r14):** `internal/cicontract`
+parses the real `ci.yml` / `release.yml` inside the already-required
+`go test ./...` job and asserts that all nine gates exist, none can be skipped
+(`if`) or fail silently (`continue-on-error`), every action is SHA-pinned,
+both consumers of the pinned engine cache use the **identical path and key**
+(with the key still carrying the three SHA256 pin prefixes read from
+`prefetch-quack-e2e.sh`), `engine-tls-capability` waits for `quack-e2e`, and
+the offline switches are set. Nine negative controls mutate the real YAML one
+property at a time and require **exactly** the intended check to fail — so
+this is a live contract, not a comment. r14 adds `CheckScriptPins`: the three
+offline scripts (`prefetch`, `quack-e2e`, `verify-engine-tls`) must declare
+the **same** engine version, extension hashes and extension path as the cache
+producer, with three single-constant drift negatives. "Remember to update all
+pins when upgrading DuckDB" is now enforced too. It adds no CI job and no
+downloads. The full CI chain
 (prefetch offline assertion → real-engine E2E → engine TLS audit) was also
 reproduced in a single `--network none` container (`OFFLINE_CI_CHAIN_PASSED`,
 3/3 RC=0).
@@ -575,9 +590,14 @@ CLI is checked to reject `proxy.ssl.enabled: true`. Run it locally with:
 bash scripts/verify-plaintext.sh                      # needs docker + go + openssl
 ```
 
-This is an **audit, not a fix**: it asserts a known weakness. If TLS
-termination is ever added, the job will (correctly) fail and the assertions
-plus docs must be updated together — do not delete the gate.
+The **transport** part is an **audit, not a fix**: it asserts a known weakness.
+If TLS termination is ever added, the job will (correctly) fail and the
+assertions plus docs must be updated together — do not delete the gate. Since
+r14 the same required job also **hard-asserts the separate token-at-rest fix**:
+`status.json` must contain neither the token value nor a `token` field by
+default (`STATUS_TOKEN_AT_REST=0`), so a regression that silently starts
+persisting credentials fails CI immediately. The explicit opt-in path is
+covered by the Go suite (`internal/supervisor/r14_token_at_rest_test.go`).
 
 **Engine TLS capability (r12, R-05):** `scripts/verify-engine-tls.sh` is a
 required CI job that reuses `quack-e2e`'s pinned, SHA256-verified offline
@@ -590,8 +610,9 @@ fingerprint and wrong token are all rejected, while a plaintext control
 endpoint still answers (so the negatives are not just "the service died").
 The job also asserts that the product boot SQL still hardcodes
 `disable_ssl = true`. **Read this as an engine audit, not a product feature:**
-quack-proxy still serves plaintext HTTP and still writes the token to
-`status.json`. The earlier wording "built-in TLS needs a design decision"
+quack-proxy still serves plaintext HTTP. **r14 separately fixed token-at-rest**
+(`status.json` no longer carries tokens by default); that is a different risk
+from cleartext transport, which remains open. The earlier wording "built-in TLS needs a design decision"
 sounded like an engine limitation; r12 corrects that — the remaining work is
 product wiring (certificate lifecycle, fingerprint distribution, HTTPS health
 probe, `status.json` contract, `gen-proxy` frontend), which is an owner
@@ -606,9 +627,9 @@ unit tests. The main bug found during that phase (signalling the bash wrapper
 orphaning the whole child tree) was caught by integration testing, not unit
 tests — a reminder that real process-management bugs need real subprocesses.
 
-The Go suite covers all six packages (74 test functions; `go test ./...`
+The Go suite covers all six packages (85 test functions; `go test ./...`
 passes clean, `go test -race` runs in CI and passes locally in a Linux
-container; total coverage 72.2% — the Windows-only runtime branch cannot be
+container; total coverage 72.8% — the Windows-only runtime branch cannot be
 exercised on a Linux runner). It exercises whole-process-group teardown, restart backoff and
 retry parking, the cold-start grace, crypto token generation, config
 validation (including injection rejection), health-check identity pinning,
