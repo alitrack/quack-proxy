@@ -22,7 +22,7 @@
 |------|------|----------|------|
 | 0 | 止血，不动架构 | 回归用例 + `go test -race ./...` 全绿；真实引擎 E2E；照 README 装 systemd 能启动 | **代码、单测、竞态、真实引擎 E2E 全部通过**；systemd 非 root 实机安装演练 **r7 已在真实 systemd 255 PID 1 补做并通过**（3/3，含负例，见 §4）→ **过门** |
 | 1 | 收安全面与边界 | 注入用例、文件权限用例、明文检查；Actions SHA pin + 产物签名；撤跨库 roundrobin | **全部通过**；LAN 明文抓包 r8 已用真实 `AF_PACKET` 实证并落成必需门禁（结论是「弱点确实存在」，不是「已修」，见 §3 R-05） → **过门** |
-| 2 | 验证与诚实化 | 基准可复现；覆盖率门槛；文档-代码一致性检查表逐条勾完 | **主体完成**；govulncheck 已于 r7 清零基线并转**必需** `vuln-scan` job；**r10 起 `quack-e2e` 已无 advisory**，包括 `pull_request` 在内的所有事件均为**必需**，且测试进程由 `--network none` 实证为严格离线（pinned CLI + `quack` + `httpfs` 缓存）；**r11 补齐 HAProxy + VIP 联调并转必需 `vip-failover`**（如实标注它只验证入口漂移、不证明产品 HA）；**r12 新增必需 `engine-tls-capability`**，用同一缓存实证引擎原生 TLS 并把「能力受限」口径更正为「产品接线设计决策」（引擎审计，R-05 仍开放）；端到端基准已可复现并给出实测 → **实质过门** |
+| 2 | 验证与诚实化 | 基准可复现；覆盖率门槛；文档-代码一致性检查表逐条勾完 | **主体完成**；govulncheck 已于 r7 清零基线并转**必需** `vuln-scan` job；**r10 起 `quack-e2e` 已无 advisory**，包括 `pull_request` 在内的所有事件均为**必需**，且测试进程由 `--network none` 实证为严格离线（pinned CLI + `quack` + `httpfs` 缓存）；**r11 补齐 HAProxy + VIP 联调并转必需 `vip-failover`**（如实标注它只验证入口漂移、不证明产品 HA）；**r12 新增必需 `engine-tls-capability`**，用同一缓存实证引擎原生 TLS 并把「能力受限」口径更正为「产品接线设计决策」（引擎审计，R-05 仍开放）；**r13 把门禁/供应链/共享缓存契约做成随必需 `go test ./...` 运行的机器断言（9 个负例）并按 CI 顺序在无网络容器复跑三段链路，文档—代码一致性检查表由此逐条勾完**；端到端基准已可复现并给出实测 → **实质过门** |
 
 **执行顺序**：先写会失败的测试，再改代码。原 35 个测试全绿却漏掉全部 P0 —— supervisor 用 `duckdb_bin: "true"` stub，并靠 `ManualSetShard` 直接注入内部状态。
 
