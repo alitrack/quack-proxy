@@ -140,6 +140,14 @@ local function authz(p)
   local hs3 = U:find("^WITH RECURSIVE SCHEMA_TREE") and U:find("DUCKDB_SCHEMAS%(%") and U:find("CURRENT_DATABASE%(%")
   if hs1 or hs2 or hs3 then return true end
   if U == "BEGIN TRANSACTION" or U == "ROLLBACK" or U == "COMMIT" then return true end
+  -- catalog enumeration is denied beyond the handshake shapes above: listing
+  -- pg_catalog/duckdb_*/information_schema leaks table existence (including
+  -- protected ones). Caught live 2026-11-16: SELECT * FROM pg_catalog.pg_tables
+  -- was allowed through the generic SELECT rule.
+  if U:find("PG_CATALOG%.") or U:find("INFORMATION_SCHEMA%.") or U:find("DUCKDB_%a-%(") then
+    audit('authz', sess and sess.user or nil, q, 'deny', 'catalog enumeration')
+    return false
+  end
 
   if not sess then
     audit('authz', nil, q, 'deny', 'no session')
