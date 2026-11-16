@@ -95,4 +95,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            --files quack-proxy-* --files SHA256SUMS
+            quack-proxy-* SHA256SUMS
