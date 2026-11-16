@@ -20,11 +20,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        - { os: linux,   arch: amd64 }
-        - { os: linux,   arch: arm64 }
-        - { os: darwin,  arch: amd64 }
-        - { os: darwin,  arch: arm64 }
-        - { os: windows, arch: amd64 }
+        include:
+          - { os: linux,   arch: amd64 }
+          - { os: linux,   arch: arm64 }
+          - { os: darwin,  arch: amd64 }
+          - { os: darwin,  arch: arm64 }
+          - { os: windows, arch: amd64 }
     steps:
       - uses: actions/checkout@v4
 
@@ -62,8 +63,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-dist
-          path: "quack-proxy-${{ GITHUB_REF_NAME }}-${{ matrix.os }}-${{ matrix.arch }}.*"
+          name: release-dist-${{ matrix.os }}-${{ matrix.arch }}
+          path: "quack-proxy-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.*"
 
   publish:
     name: publish release
@@ -74,8 +75,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: release-dist
           path: dist
+          pattern: release-dist-*
 
       - name: Checksums
         working-directory: dist
