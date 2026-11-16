@@ -8,12 +8,17 @@
 # and finally stops the daemon and checks the port is released.
 #
 # Requirements: Linux, bash, curl, sha256sum, tar, go (to build the daemon
-# unless --proxy-bin is supplied), and network access on first run to fetch
-# the pinned DuckDB CLI + the signed core `quack` extension.
+# unless --proxy-bin is supplied). WITHOUT --cache-dir it needs network on
+# first run to fetch the pinned DuckDB CLI + the signed core `quack` extension.
+# WITH --cache-dir (produced by prefetch-quack-e2e.sh) it is STRICTLY OFFLINE:
+# no download, no INSTALL; DuckDB loads the signed extension from an isolated
+# $HOME. CI sets QUACK_E2E_OFFLINE=1, which makes a missing or corrupt cache a
+# hard failure instead of a silent network fallback.
 #
 # Usage:
-#   bash scripts/quack-e2e.sh                       # download pinned DuckDB
-#   bash scripts/quack-e2e.sh --benchmark 200      # also run 200 queries
+#   bash scripts/quack-e2e.sh --cache-dir ./engine-cache   # offline (CI path)
+#   bash scripts/quack-e2e.sh                             # download pinned DuckDB
+#   bash scripts/quack-e2e.sh --benchmark 200             # also run 200 queries
 #   bash scripts/quack-e2e.sh --duckdb /opt/duckdb --proxy-bin ./quack-proxy
 #   DUCKDB_VERSION_OVERRIDE=1 bash scripts/quack-e2e.sh --duckdb ... # skip hash check
 #
@@ -25,19 +30,36 @@ set -euo pipefail
 DUCKDB_VERSION="v2.0.0"
 DUCKDB_SHA256="c6507206baf7793c6013dbd82368469a45f20dc0e17a6f92f204602f652ed2bc"
 
+# Offline cache pins (r10). Kept in sync with prefetch-quack-e2e.sh; a mismatch
+# here is a build error, not a reason to relax the pin. DuckDB re-verifies the
+# core extension signatures on LOAD, so a forged cache cannot pass silently.
+# httpfs is required for the disk-backed database: DuckDB v2.0.0 otherwise
+# starts with a read-only crypto module. Having the file present is enough
+# (autoload picks it up); the daemon's boot SQL is intentionally unchanged.
+EXT_SHA256="9c893bd543ec2c5253d0c47d5614f90a1bfa1791c735dc6bbcea4e8bd3811a97"
+HTTPFS_SHA256="77e6c429aa04f25da7962572f12b19113e0ce46080fa1365ad66017aadcdb68d"
+EXT_RELPATH="${DUCKDB_VERSION}/linux_amd64"
+CACHE_MANIFEST="quack-e2e-manifest.txt"
+
 PORT="${QUACK_E2E_PORT:-19491}"
 TOKEN="${QUACK_E2E_TOKEN:-e2e-secret-token}"
 BENCH=0
 WORK=""
 DUCKDB_BIN=""
 PROXY_BIN=""
+CACHE_DIR="${QUACK_E2E_CACHE_DIR:-}"
+OFFLINE="${QUACK_E2E_OFFLINE:-0}"
+# In cache mode this is an isolated HOME holding the signed extension, so both
+# the daemon's boot SQL (LOAD quack) and the client's LOAD resolve offline.
+# go build deliberately does NOT use it: changing HOME would discard GOCACHE.
+DUCK_HOME=""
 KEEP=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
-  sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "${BASH_SOURCE[0]}"
   exit "${1:-0}"
 }
 
@@ -45,6 +67,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --duckdb)     DUCKDB_BIN="$2"; shift 2 ;;
     --proxy-bin)  PROXY_BIN="$2"; shift 2 ;;
+    --cache-dir)  CACHE_DIR="$2"; shift 2 ;;
     --work)       WORK="$2"; KEEP=1; shift 2 ;;
     --port)       PORT="$2"; shift 2 ;;
     --benchmark)  BENCH="$2"; shift 2 ;;
@@ -75,8 +98,57 @@ trap cleanup EXIT
 
 echo "==> work dir: $WORK"
 
-# --- 1. pinned DuckDB CLI -------------------------------------------------
-if [[ -z "$DUCKDB_BIN" ]]; then
+# Only duckdb / the daemon get the isolated HOME. `go build` below keeps the
+# real HOME so GOCACHE / GOMODCACHE are not discarded.
+run_with_duck_home() {
+  if [[ -n "$DUCK_HOME" ]]; then env HOME="$DUCK_HOME" "$@"; else "$@"; fi
+}
+
+if [[ "$OFFLINE" == "1" && -z "$CACHE_DIR" ]]; then
+  echo "FAIL: QUACK_E2E_OFFLINE=1 requires --cache-dir (or QUACK_E2E_CACHE_DIR)" >&2
+  exit 1
+fi
+
+# --- 1. pinned DuckDB CLI + signed core extension -------------------------
+cache_ready() {
+  [[ -n "$CACHE_DIR" ]] || return 1
+  local cli="$CACHE_DIR/duckdb-cli-linux-amd64.tar.gz"
+  local ext="$CACHE_DIR/quack.duckdb_extension"
+  local httpfs="$CACHE_DIR/httpfs.duckdb_extension"
+  printf '%s  %s\n' "$DUCKDB_SHA256" "$cli" | sha256sum -c - >/dev/null 2>&1 || return 1
+  printf '%s  %s\n' "$EXT_SHA256" "$ext" | sha256sum -c - >/dev/null 2>&1 || return 1
+  printf '%s  %s\n' "$HTTPFS_SHA256" "$httpfs" | sha256sum -c - >/dev/null 2>&1 || return 1
+  grep -qx "extension_relpath=${EXT_RELPATH}" "$CACHE_DIR/$CACHE_MANIFEST" 2>/dev/null || return 1
+  return 0
+}
+
+if [[ -n "$CACHE_DIR" ]]; then
+  # Cache mode is ALWAYS offline: no curl, no INSTALL. A bad cache must fail
+  # loudly rather than silently reintroduce the CDN dependency we removed.
+  if ! cache_ready; then
+    echo "FAIL: offline cache missing or corrupt: ${CACHE_DIR}" >&2
+    echo "      run: bash scripts/prefetch-quack-e2e.sh --cache-dir ${CACHE_DIR}" >&2
+    echo "      (QUACK_E2E_OFFLINE=${OFFLINE}; no network fallback in cache mode)" >&2
+    exit 1
+  fi
+  echo "==> verifying pinned offline cache"
+  echo "${DUCKDB_SHA256}  ${CACHE_DIR}/duckdb-cli-linux-amd64.tar.gz" | sha256sum -c -
+  echo "${EXT_SHA256}  ${CACHE_DIR}/quack.duckdb_extension" | sha256sum -c -
+  echo "${HTTPFS_SHA256}  ${CACHE_DIR}/httpfs.duckdb_extension" | sha256sum -c -
+  mkdir -p "$WORK/engine"
+  tar xzf "$CACHE_DIR/duckdb-cli-linux-amd64.tar.gz" -C "$WORK/engine"
+  DUCKDB_BIN="$WORK/engine/duckdb"
+  # DuckDB v2.0.0 ignores DUCKDB_EXTENSION_DIRECTORY and the daemon's boot SQL
+  # is fixed (LOAD quack, no SET). A per-process HOME is the only way to make
+  # BOTH the shard and the client resolve the signed extension offline.
+  DUCK_HOME="$WORK/home"
+  mkdir -p "$DUCK_HOME/.duckdb/extensions/${EXT_RELPATH}"
+  cp "$CACHE_DIR/quack.duckdb_extension" \
+     "$DUCK_HOME/.duckdb/extensions/${EXT_RELPATH}/quack.duckdb_extension"
+  cp "$CACHE_DIR/httpfs.duckdb_extension" \
+     "$DUCK_HOME/.duckdb/extensions/${EXT_RELPATH}/httpfs.duckdb_extension"
+  echo "OFFLINE_CACHE_USED=1"
+elif [[ -z "$DUCKDB_BIN" ]]; then
   url="https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb-cli-linux-amd64.tar.gz"
   echo "==> fetching pinned DuckDB ${DUCKDB_VERSION}"
   # GitHub Releases has returned transient 5xx for this asset. curl retries
@@ -96,15 +168,20 @@ if [[ -z "$DUCKDB_BIN" ]]; then
   DUCKDB_BIN="$WORK/engine/duckdb"
 fi
 [[ -x "$DUCKDB_BIN" ]] || { echo "FAIL: duckdb binary not executable: $DUCKDB_BIN" >&2; exit 1; }
-echo "==> duckdb: $("$DUCKDB_BIN" --version)"
+echo "==> duckdb: $(run_with_duck_home "$DUCKDB_BIN" --version)"
 
 # Quack is a SIGNED CORE extension on v2.0.0. `INSTALL quack FROM community`
 # (as older docs suggested) returns HTTP 404; install it from the core repo
 # so no -unsigned flag is needed. Production deployments are expected to
-# pre-install the signed extension (SCOPE.md), so prefer a local copy: the
-# extension CDN is an external dependency and can be unavailable (HTTP 502).
-if "$DUCKDB_BIN" -c "LOAD quack;" >/dev/null 2>&1; then
-  echo "==> signed core extension: already installed (offline)"
+# pre-install the signed extension (SCOPE.md). In cache mode it is already
+# seeded into the isolated HOME, so LOAD must succeed with NO network at all.
+if run_with_duck_home "$DUCKDB_BIN" -c "LOAD quack;" >/dev/null 2>&1; then
+  echo "==> signed core extension: loaded offline (signature verified by DuckDB)"
+elif [[ -n "$CACHE_DIR" ]]; then
+  echo "FAIL: LOAD quack failed although the signed extension was pre-seeded" >&2
+  echo "      expected: ${DUCK_HOME}/.duckdb/extensions/${EXT_RELPATH}/quack.duckdb_extension" >&2
+  ls -laR "$DUCK_HOME/.duckdb/extensions" >&2 || true
+  exit 1
 else
   echo "==> installing signed core extension: quack"
   # The extension CDN has served HTTP 502 in past runs. Retry INSTALL without
@@ -112,7 +189,7 @@ else
   # check is part of the supply-chain guarantee (R-14).
   installed=0
   for attempt in 1 2 3; do
-    if "$DUCKDB_BIN" -c "INSTALL quack; LOAD quack;" \
+    if run_with_duck_home "$DUCKDB_BIN" -c "INSTALL quack; LOAD quack;" \
       > "$WORK/extension-install.log" 2>&1; then installed=1; break; fi
     echo "==> extension install attempt ${attempt} failed; retrying" >&2
     sleep 3
@@ -153,7 +230,9 @@ YAML
 
 # --- 4. start -------------------------------------------------------------
 echo "==> starting quack-proxy (port ${PORT})"
-"$PROXY_BIN" start -c "$WORK/config.yaml" > "$WORK/daemon.log" 2>&1 &
+# The daemon forks duckdb, which must inherit the isolated HOME containing the
+# signed extension. `env` execs in place, so $! is still the daemon PID.
+run_with_duck_home "$PROXY_BIN" start -c "$WORK/config.yaml" > "$WORK/daemon.log" 2>&1 &
 DAEMON_PID=$!
 
 port_open() { (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null && { exec 3<&-; exec 3>&-; }; }
@@ -210,7 +289,7 @@ echo "==> health loop reports healthy"
 # --- 5. client over the Quack protocol ------------------------------------
 client_sql() {
   local tok="$1" sql="$2"
-  "$DUCKDB_BIN" -c "
+  run_with_duck_home "$DUCKDB_BIN" -c "
 LOAD quack;
 CREATE OR REPLACE SECRET (TYPE QUACK, TOKEN '${tok}');
 ATTACH 'quack:127.0.0.1:${PORT}' AS s;

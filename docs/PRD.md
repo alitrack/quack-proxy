@@ -32,9 +32,10 @@
 | 非 root systemd 安装演练 | §3.3 §6 | **已实机通过（r7）** | `scripts/systemd-install-drill.sh` 在真实 systemd 255 PID 1 安装 shipped unit 并启停，验证账户、`RuntimeDirectory`、0600 文件、healthy、脱敏与全量清理，带「无 RuntimeDirectory 必失败」负例；3/3 通过，CI 必需 job `systemd-drill`。r6 的「环境无 systemd」结论作废 |
 | 漏洞扫描与发布工具链 | — | **已收口（r7）** | `go1.26.11` 的 11 项 stdlib 告警在 `go1.27.4` 下清零；必需 `vuln-scan` job + release 固定 `go1.27.4`；CI 矩阵 1.25 / 1.26 / 1.27（R-14） |
 | LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复**，`disable_ssl` 硬编码仍属需设计决策（R-05） |
-| 真实引擎 E2E 在 CI 的门禁范围 | — | **已收紧（r8）** | 下载与 `INSTALL quack` 各 3 次重试；`continue-on-error` 仅对 `pull_request` 生效，push main / 手动触发为必需。PR 上仍 advisory（外部 CDN 在容器内偶发不可用） |
+| 真实引擎 E2E 在 CI 的门禁范围 | — | **全部必需（r10）** | r8 曾把 `continue-on-error` 收紧为仅 PR advisory；r10 移除该逃生口。新增 `scripts/prefetch-quack-e2e.sh` + SHA-pinned `actions/cache`，把 pinned CLI / `quack` / `httpfs` 做成离线缓存；测试进程 `QUACK_E2E_OFFLINE=1` 严格离线，缓存缺失即硬失败。**PR 也为必需**。如实保留：首次 cache miss 仍需 runner 访问上游一次 |
 | Windows 发布产物 | §7 §8 §10 | **已撤下（r9）** | 真实 Windows 实证后从 `release.yml` 移除 windows/amd64 与 `.zip` 打包；CI 保留交叉编译，二进制启动即显式拒绝。必需 job `windows-runtime-guard` 守住该行为（R-18） |
-| 真实引擎 E2E 完整复跑 | — | **已通过（r9）** | 主机 HTTPS 取 pinned DuckDB v2.0.0 CLI（SHA256 与脚本 pin 一致）+ 官方签名 core 扩展，离线喂入容器后 `ALL_QUACK_E2E_CHECKS_PASSED`：正确/错误 token、健康循环、50 次 SELECT（207 ms / ~241 qps）、停止后端口释放无孤儿。此前卡在 `INSTALL quack` 属容器内下载通道慢 |
+| 真实引擎 E2E 完整复跑 | — | **已通过（r9），r10 收紧口径** | r9：主机 HTTPS 取 pinned DuckDB v2.0.0 CLI（SHA256 与脚本 pin 一致）+ 官方签名 core 扩展，喂入容器后 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 207 ms / ~241 qps）。**r10 更正**：r9 的容器仍联网、由 DuckDB autoload 下载了 `httpfs`，严格来说不是「离线」。r10 首次用 `--network none` 复跑，发现磁盘库报 `read-only crypto module loaded`，据此把 `httpfs` 也 pin 进缓存，并在单个无网络容器内再次跑到 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 230 ms / ~217 qps）+ 4 个负例 |
+| 完全离线部署的扩展依赖 | — | **r10 新增运维约束** | DuckDB v2.0.0 写磁盘数据库必须能加载签名 core `httpfs` 提供完整 crypto 后端；只预装 `quack` 会在无网络主机上启动失败。离线部署需同时预装 `quack` + `httpfs`，`allow_unsigned_extensions` 保持 false。文件存在即可被 autoload 命中，boot SQL 无需改动 |
 
 > 状态取值：已实现 / 部分实现 / 未实现 / 已放弃。编号 `R-xx` 对应 `REMEDIATION.md`。
 

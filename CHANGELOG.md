@@ -2,6 +2,35 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r10 (2026-11-16)
+
+把整改台账里最后一项「本环境能做、但一直被当作做不到」收紧：`quack-e2e` 在 **PR 上也不再是 advisory**。做法是让真实引擎 E2E 不再在测试过程中访问外部 CDN，改为 CI runner 上一次性预取、SHA256 校验、缓存复用。
+
+### 更正：「离线」这个词之前用得不严谨
+
+r9 写「离线喂入 pinned CLI + 签名扩展后 E2E 完整通过」——产物确实是离线的，但**容器仍有网络**。本轮首次用 `--network none` 复跑，立刻失败：磁盘数据库分片报 `DuckDB currently has a read-only crypto module loaded. Please ensure httpfs is loaded using LOAD httpfs`。根因是 DuckDB v2.0.0 写加密数据库文件需要 `httpfs` 带来的完整 crypto 后端；r9 之所以通过，是 DuckDB 在联网容器里把 httpfs **autoload** 掉了。判别实验：同一无网络容器里 `:memory:` 数据库一切正常，只有磁盘库触发该错误。
+
+因此本轮把 `httpfs` 也作为**签名 core 扩展** pin 进缓存（gzip SHA256 `ee6c7d7e…`，解压后 `77e6c429…`），与 `quack` 一起放进隔离 HOME 的扩展目录。文件存在即可由 autoload 命中，**不需要改动 supervisor 的 boot SQL，也不需要 `-unsigned` 或 community 源**。同时明确一条新的运维约束：完全离线的生产部署必须预装 `quack` **与** `httpfs`，只装 `quack` 会在写磁盘库时失败。
+
+### Added / Changed
+
+- **新增 `scripts/prefetch-quack-e2e.sh`**：在 CI runner（而非测试进程内）准备离线缓存，pin 三件产物 —— DuckDB v2.0.0 CLI（`c6507206…`）、签名 `quack`（`9c893bd5…`）、签名 `httpfs`（`77e6c429…`），连同 gzip 的中间 hash 与 manifest。缓存命中时**零网络请求**；`QUACK_PREFETCH_OFFLINE=1` 只做断言、绝不下载。下载带 3×3 重试，已完整且校验通过的 `.gz` 会直接复用（本机实测 httpfs 对象反复在 ~8 MB 处断流，这个复用是必要的）。
+- **`scripts/quack-e2e.sh` 新增 `--cache-dir` / `QUACK_E2E_CACHE_DIR`**：缓存模式下严格离线（无 `curl` 下载、无 `INSTALL`），逐项校验三个 hash，把扩展放进**隔离 HOME**（`DUCKDB_EXTENSION_DIRECTORY` 在 v2.0.0 实测被忽略，`SET extension_directory` 又无法注入固定的 boot SQL；`go build` 仍用真实 HOME 以免丢 GOCACHE）。`QUACK_E2E_OFFLINE=1` 时缓存缺失/损坏是硬失败，**不静默回退联网**。非缓存模式保持原有下载 + `INSTALL` 重试行为不变。
+- **`.github/workflows/ci.yml`**：`quack-e2e` 移除 `continue-on-error`，**所有事件（含 `pull_request`）均为必需门禁**；新增 SHA-pinned `actions/cache@0057852… # v4.3.0`（key 含三个 hash）、prefetch 步骤、离线断言步骤。CI 注释如实写明残余风险：首次 cache miss 仍需访问上游一次，但不再有 advisory 逃生口。
+- `README.md` / `docs/SCOPE.md` / `docs/REMEDIATION.md` / `docs/SECURITY.md` / `docs/PRD.md` 全部收敛 r10。
+
+### Verification（r10 实机）
+
+- **单个 `--network none` 容器内**跑完整链路：prefetch 的 miss / hit / 严格离线断言三条路径全通，随后 `QUACK_E2E_OFFLINE=1 bash scripts/quack-e2e.sh --cache-dir … --benchmark 50` 输出 `ALL_QUACK_E2E_CHECKS_PASSED` —— DuckDB v2.0.0、正确/错误 token、HTTP 200 健康循环、50 次 SELECT（230 ms，~217 qps）、停止后端口释放无孤儿。证据行含三个 `OK` 的 SHA256 校验与 `OFFLINE_CACHE_USED=1`。
+- **4 个负例全过**：空缓存 + `OFFLINE=1`、完全不给 `--cache-dir` + `OFFLINE=1`、篡改 `httpfs` 条目、prefetch 严格离线断言遇不完整缓存 —— 全部非零退出，且输出中不存在 `ALL_QUACK_E2E_CHECKS_PASSED` / `all shards started` / `PREFETCH_CACHE_HIT`。另有无网络下的判别负例：不预装 httpfs 时磁盘库写失败，`:memory:` 正常。
+- 回归：10 个脚本 `bash -n`、三份 YAML `yaml.v3` 实解析、`git diff --check` 干净；Go 代码本轮未改动，`gofmt` / `go vet` / `go test ./... -race` 复跑 5 包全绿、覆盖率 70.9%。
+
+#### 仍未完成（如实）
+
+HAProxy + VIP 联调（需真实浮动 IP / 双机网络）；R-05 的 `disable_ssl` 硬编码 / token 不落盘 / 内建 TLS 属**需设计决策**（`plaintext-audit` 只证明弱点、不修风险）；真 HA 属新产品立项。**r10 已解除**：`quack-e2e` 在 PR 上的 advisory。**r9 已解除**：Windows 产物收口、真实引擎 E2E 完整复跑（本轮进一步收紧为严格离线）。
+
+---
+
 ## Unreleased — remediation r9 (2026-11-16)
 
 本轮收口 R-18（Windows 产物），并把「外部依赖导致跑不完」的 E2E 用离线通道完整复跑通过。

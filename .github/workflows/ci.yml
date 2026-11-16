@@ -7,10 +7,11 @@
 # The Go suite is hermetic (no DuckDB or network needed): lifecycle tests use
 # stub duckdb_bin executables. One integration test forks a REAL child
 # process group and drives start -> kill -> self-heal -> stop; POSIX-only
-# cases skip on Windows (R-18). The `quack-e2e` job additionally runs a real
-# DuckDB + Quack engine through scripts/quack-e2e.sh. Since r9 the required
-# `windows-runtime-guard` job checks on a real Windows runner that any
-# cross-compiled binary refuses to start with an actionable message.
+# cases skip on Windows (R-18). Since r9 the required `windows-runtime-guard`
+# job checks on a real Windows runner that any cross-compiled binary refuses
+# to start with an actionable message. Since r10 `quack-e2e` runs a real
+# DuckDB + Quack engine strictly offline from a SHA256-pinned cache and is
+# REQUIRED on pull requests too; see the job comment for the cache contract.
 name: CI
 
 on:
@@ -80,23 +81,43 @@ jobs:
         run: python3 examples/duckdb_serve_host_test.py
 
   quack-e2e:
-    name: real DuckDB + Quack E2E (pinned v2.0.0)
+    name: real DuckDB + Quack E2E (pinned v2.0.0, offline cache)
     runs-on: ubuntu-latest
-    # This job reaches out to GitHub Releases and DuckDB's signed core
-    # extension repository (both have returned transient 502s). The script
-    # now retries the download and INSTALL up to 3 times. On pull requests it
-    # stays advisory so an upstream outage cannot turn an unrelated PR red;
-    # on pushes to main and manual runs it is a REQUIRED gate - the branch
-    # cannot silently ship without a real-engine check.
-    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    # REQUIRED on EVERY event including pull requests (r10). Previously the
+    # test process itself fetched GitHub Releases + the signed extension CDN
+    # on every run (transient 5xx / early-EOF), so PRs had to be advisory.
+    # Now prefetch-quack-e2e.sh fills a SHA256-verified cache on the runner
+    # ONLY on a cache miss, and quack-e2e.sh runs STRICTLY OFFLINE from it:
+    # no curl, no INSTALL, no CDN dependency during the test. The cache also
+    # pins httpfs: DuckDB v2.0.0 cannot write a disk-backed database with its
+    # read-only crypto module alone, and an isolated HOME cannot autoload
+    # httpfs from the network. r9's "offline" run still had network and let
+    # DuckDB fetch httpfs implicitly; r10 closes that hole. A missing or
+    # corrupted cache fails loudly instead of silently reaching the network.
+    # Residual risk, stated honestly: a first-ever cache miss still needs the
+    # upstream once; retries + runner-side (not in-container) fetches make
+    # that rare, but it is not "impossible". No advisory escape hatch.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - name: run real engine E2E
-        run: bash scripts/quack-e2e.sh --benchmark 50
+      - name: restore pinned engine cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/quack-e2e-cache
+          key: quack-e2e-v2.0.0-cli-c6507206-quack-9c893bd5-httpfs-77e6c429-v2
+          restore-keys: |
+            quack-e2e-v2.0.0-
+      - name: prefetch pinned CLI + signed extension (cache miss only)
+        run: bash scripts/prefetch-quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
+      - name: assert cache complete without network
+        run: QUACK_PREFETCH_OFFLINE=1 bash scripts/prefetch-quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
+      - name: run real engine E2E (strictly offline)
+        env:
+          QUACK_E2E_OFFLINE: '1'
+        run: bash scripts/quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache" --benchmark 50
 
   crash-drill:
     name: daemon crash drill (R-01 / R-22)

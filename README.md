@@ -8,7 +8,7 @@
 
 > One YAML, one command. Start and supervise multiple DuckDB + Quack endpoints on a single host.
 
-> **Status (2026-11-16, remediation r9):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
+> **Status (2026-11-16, remediation r10):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All CI gates are now required (no advisory left), including a strictly-offline real-engine E2E. **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
 
 **quack-proxy** is a lightweight Go daemon that manages multiple DuckDB+[Quack](https://duckdb.org/docs/stable/extensions/quack.html) child processes with built-in health checks, automatic restart, and HAProxy config generation. Think of it as the "systemd for DuckDB Quack endpoints" — except you configure it in one YAML file and it handles everything. It does **not** provide control-plane redundancy, automatic failover, or a unified query endpoint.
 
@@ -250,7 +250,7 @@ See [`quack-proxy.example.yaml`](quack-proxy.example.yaml) for a fully annotated
 | `global.log_level` | string | `info` | debug, info, warn, error |
 | `global.pid_file` | string | `/var/run/quack-proxy/quack-proxy.pid` | PID file path |
 | `global.status_file` | string | `/var/run/quack-proxy/status.json` | Live cluster state (shards, ports, tokens, restarts) written every health-check cycle; read by `status` and `gen-proxy` |
-| `global.duckdb_bin` | string | `duckdb` | DuckDB host binary/script. Can be a wrapper (e.g. a python-hosted engine) — invoked as `<duckdb_bin> <db>` with boot SQL on stdin. **Supported baseline: v2.0.0 stable** (`scripts/quack-e2e.sh` pins the linux-amd64 CLI by SHA256). Alpha CLI builds have served broken token auth. |
+| `global.duckdb_bin` | string | `duckdb` | DuckDB host binary/script. Can be a wrapper (e.g. a python-hosted engine) — invoked as `<duckdb_bin> <db>` with boot SQL on stdin. **Supported baseline: v2.0.0 stable** (`scripts/quack-e2e.sh` / `prefetch-quack-e2e.sh` pin the linux-amd64 CLI by SHA256). Alpha CLI builds have served broken token auth. On an offline host, pre-install the signed `quack` **and `httpfs`** core extensions — DuckDB v2.0.0 needs httpfs for the crypto backend when writing a disk database (r10). |
 | `global.allow_unsigned_extensions` | bool | `false` | Adds `-unsigned` to the DuckDB invocation. Only enable after pre-installing and hash-verifying the extensions; unsigned extensions can load arbitrary native code. |
 | `listener.allow_other_hostname` | bool | `false` | Relaxes Quack's Host-header check. Needed only when clients reach a shard via a VIP or DNS name. |
 | `listener.bind_host` | string | `127.0.0.1` | Quack listen address. **Loopback by default**; exposing to a LAN sends plaintext HTTP with the token as the only credential — terminate TLS externally. |
@@ -498,11 +498,15 @@ R-23 hardening check), `systemd-drill` (above), `vuln-scan`,
 `plaintext-audit` (below), and `windows-runtime-guard` (a real
 windows-latest runner proves the cross-compiled binary refuses to start
 honestly, R-18). **Releases publish linux/darwin only**; the Windows build
-is a source-compatibility check, not a supported artifact. A **real
-DuckDB + Quack E2E job**
-(`scripts/quack-e2e.sh`, with 3 retries on its two external downloads) is
-advisory **only on pull requests**; on pushes to `main` and manual runs it is
-a required gate. Every GitHub Action is
+is a source-compatibility check, not a supported artifact. The **real
+DuckDB + Quack E2E job** is **required on every event, including pull
+requests** (r10; no advisory left): `prefetch-quack-e2e.sh` fills a
+SHA256-verified cache with the pinned CLI + signed `quack` + signed `httpfs`
+once on the runner (SHA-pinned `actions/cache`), and `quack-e2e.sh` then runs
+**strictly offline** from it (`QUACK_E2E_OFFLINE=1`: no download, no
+`INSTALL`; a missing or corrupt cache is a hard failure). It is proven in a
+`--network none` container. Residual risk, stated plainly: a first-ever cache
+miss still needs the upstream once. Every GitHub Action is
 pinned to a full commit SHA; release binaries are built with the same patched
 `go1.27.4` toolchain the vulnerability gate checks, and release checksums are
 signed with cosign keyless OIDC (see [SECURITY.md](docs/SECURITY.md)).
@@ -576,10 +580,13 @@ Three verification layers close the old "testing illusion" gap (R-15):
 - `scripts/quack-e2e.sh` runs a **real pinned DuckDB v2.0.0 + signed Quack
   extension**: correct-token `ATTACH/SELECT`, wrong-token rejection, HTTP 200
   greeting + healthy status, an optional `ATTACH/SELECT` benchmark, and
-  cleanup verification. It prefers an already-installed signed extension
-  (`LOAD quack`) and only reaches the network when that is missing, so it
-  also works offline. Verified end-to-end on 2026-11-13: three consecutive
-  runs on different ports all passed with the port released after stop.
+  cleanup verification. Two modes: **without `--cache-dir`** it downloads the
+  pinned CLI and `INSTALL quack` with retries; **with `--cache-dir`** (built by
+  `scripts/prefetch-quack-e2e.sh`) it is strictly offline — no download, no
+  `INSTALL`, SHA256-verified CLI + `quack` + `httpfs`, extensions seeded into
+  an isolated HOME. `QUACK_E2E_OFFLINE=1` makes a bad cache a hard failure.
+  r10 proof: a single `--network none` container ran the whole chain to
+  `ALL_QUACK_E2E_CHECKS_PASSED` plus 4 negative controls.
 - `scripts/daemon-crash-drill.sh` SIGKILLs a real daemon and asserts that a
   restart is **refused** while the orphaned shard still owns the port. Before
   the fix, the new daemon reported `healthy` because the orphan answered the
@@ -613,10 +620,16 @@ bits are explicitly skipped on Windows (R-18) rather than faked. r9 removed
 the extra skip that was only needed because `lookupBin` misread Windows mode
 bits. See [REMEDIATION.md](docs/REMEDIATION.md).
 
-**Real-engine E2E:** `scripts/quack-e2e.sh` was re-run end to end with the
+**Real-engine E2E:** r9 re-ran `scripts/quack-e2e.sh` end to end with the
 pinned DuckDB v2.0.0 CLI and the official signed core extension supplied
-offline (`ALL_QUACK_E2E_CHECKS_PASSED`, 50 SELECTs in 207 ms, clean port
-release). The in-container download being slow is not a script defect.
+offline (`ALL_QUACK_E2E_CHECKS_PASSED`, 50 SELECTs in 207 ms). **r10 corrected
+that wording**: the r9 container still had network, and DuckDB silently
+autoloaded `httpfs`. With `--network none`, a disk-backed shard fails with
+`read-only crypto module loaded` (`:memory:` works). r10 therefore pins
+`httpfs` alongside `quack` and re-proved the full chain in a genuinely
+network-less container (`ALL_QUACK_E2E_CHECKS_PASSED`, 50 SELECTs in 230 ms,
+clean port release) with 4 negative controls. Offline deployments must
+pre-install both extensions.
 
 The Python statement splitter (`examples/duckdb_serve_host.py`) has its own
 14-test suite (`examples/duckdb_serve_host_test.py`) that needs no DuckDB
@@ -626,7 +639,10 @@ install. CI runs both:
 go vet ./...
 go test ./... -race -count=1 -cover
 python3 examples/duckdb_serve_host_test.py
-bash scripts/quack-e2e.sh --benchmark 50   # Linux, needs network on first run
+bash scripts/prefetch-quack-e2e.sh --cache-dir ./engine-cache
+QUACK_E2E_OFFLINE=1 bash scripts/quack-e2e.sh --cache-dir ./engine-cache --benchmark 50
+# or, without a cache (downloads the pinned CLI + INSTALL quack on first run):
+bash scripts/quack-e2e.sh --benchmark 50
 ```
 
 ### Verifying a downloaded release

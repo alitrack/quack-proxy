@@ -198,8 +198,12 @@ kill -9 $ANALYTICS_PID
 | r5 复跑（30 次往返） | 155 / 323 / 162 / 148 ms（~92–202 qps，单客户端含 ATTACH）；5 轮通过，另 1 轮因冷启动超过脚本 30s 等待窗口失败，已把窗口加长到 60s 并增强诊断 |
 
 **这个数字是单客户端顺序往返延迟，不是吞吐基准**，与上文 83K QPS 不可比较。两次实测差异来自共享宿主机负载，不应解读为性能回退或提升。
-复现：`bash scripts/quack-e2e.sh --benchmark 200`。默认首次运行会联网下载
-pinned DuckDB CLI 并 `INSTALL quack`；也可自行预置 CLI（`--duckdb`）并把签名
-core 扩展预装到 DuckDB 扩展目录，脚本会优先 `LOAD quack` 复用本地副本，
-因此在扩展 CDN 不可用（实测 HTTP 502）的环境中仍可离线运行。CI 里有
-advisory 的 `quack-e2e` job 跑 50 次。
+复现：`bash scripts/quack-e2e.sh --benchmark 200`。两种模式：**不带缓存**时
+首次运行会联网下载 pinned DuckDB CLI 并 `INSTALL quack`；**带缓存**时先跑
+`bash scripts/prefetch-quack-e2e.sh --cache-dir ./engine-cache` 取三个
+SHA256 校验的 pinned 产物（CLI + 签名 `quack` + 签名 `httpfs`），再以
+`QUACK_E2E_OFFLINE=1 bash scripts/quack-e2e.sh --cache-dir ./engine-cache --benchmark 50`
+严格离线运行（无下载、无 `INSTALL`，缓存损坏即硬失败）。CI 的 `quack-e2e`
+job **自 r10 起在所有事件（含 PR）都是必需门禁**，跑 50 次；r8 曾仅在 PR 上为
+advisory。r10 在无网络容器中的 50 次实测为 230 ms（~217 qps），口径与本节相同
+但环境不同，不应直接比较。
