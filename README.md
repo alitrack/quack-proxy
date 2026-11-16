@@ -309,6 +309,35 @@ Verified rules (2026-11-09, DuckDB 2.0.0 stable engine):
 - Lua policy bodies must be valid Lua — an early compile failure makes every
   token fail with `Authentication failed`.
 
+### RBAC v2: scoped tokens + persistent audit (`examples/rbac2-init.sql`)
+
+Built on the same hook mechanism, v2 adds what a multi-user shard actually
+needs. E2E 13/13 PASS (`examples/rbac2-e2e.py`, 2026-11-16):
+
+- **Scoped tokens** — each token carries a verb ceiling (`RO`/`RW`): an `RO`
+  token cannot write even where its role holds write grants. `max_rows` and
+  `stmt_timeout_ms` fields are reserved on the token record.
+- **Write-bypass classification** — `WITH x AS (...) INSERT ...` shapes (the
+  bypass DuckDB's own security notes flag against text matching) are
+  classified as writes and stopped by the ceiling.
+- **Fail-closed on unclassified statements** — `SET`, `CALL`, `PRAGMA`, …
+  are denied unless explicitly classified.
+- **Persistent audit with protected readout** — every authn/authz decision is
+  written to an `rbac_audit` table (best-effort, pcall-guarded) and to an
+  in-memory ring (4096) that never blocks the hook. The audit table itself is
+  denied to every wire token — reading it would leak other users' queries.
+  Operators read it from the shard host directly:
+  `SELECT * FROM rbac_audit ORDER BY seq DESC LIMIT 50;`
+- **Unknown-table default-deny** — a query naming any table outside the grant
+  list is denied (the table need not exist).
+
+```yaml
+shards:
+  - name: mimic
+    database: /data/mimic.duckdb
+    init_sql_file: /etc/quack-proxy/rbac2-init.sql   # v2 example
+```
+
 ---
 
 ## Integration with duckdb_fdw

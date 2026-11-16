@@ -39,7 +39,7 @@ local GRANTS = {
 }
 local ALL_TABLES = { 'PUBLIC_DATA', 'SECRET_DATA' }
 
--- ============ audit ring buffer ============
+-- ============ audit: ring (always) + persistent table (best-effort) ============
 local RING_SIZE = 4096
 local ring = {}          -- circular array
 local ring_n = 0         -- total events ever (monotonic)
@@ -51,17 +51,34 @@ local function now()
   return ok and t or 0
 end
 
+-- Persistent audit write. _duckdb_query inside the hooks is the pattern
+-- quackhole-rbac uses in production (its authn/authz read/write tables the
+-- same way); it works on the quack_query request path. The 2026-11-09 ATTACH
+-- handshake deadlock does not apply there — but if a write ever fails the
+-- ring below still holds the event, so this is best-effort by pcall.
+local function audit_persist(seq, ts, kind, user, q, verdict, detail)
+  pcall(function()
+    _duckdb_query(string.format(
+      "INSERT INTO rbac_audit VALUES (%d, %d, '%s', %s, %s, '%s', '%s')",
+      seq, ts, esc(kind),
+      user and ("'" .. esc(user) .. "'") or 'NULL',
+      q and ("'" .. esc(q:sub(1, 512)) .. "'") or 'NULL',
+      esc(verdict), esc(detail or '')))
+  end)
+end
+
 local function audit(kind, user, q, verdict, detail)
   ring_n = ring_n + 1
   ring[ring_n] = {
     seq = ring_n,
     ts = now(),
-    kind = kind,       -- 'authn' | 'authz' | 'rows_violation' | 'timeout'
+    kind = kind,       -- 'authn' | 'authz'
     user = user,
     q = q and q:sub(1, 512) or nil,
     verdict = verdict, -- 'allow' | 'deny'
     detail = detail,
   }
+  audit_persist(ring_n, ring[ring_n].ts, kind, user, q, verdict, detail)
 end
 
 -- ============ statement classification (regex-free, shape-based) ============
@@ -146,9 +163,17 @@ local function authz(p)
     return false
   end
 
-  -- table grants: deny if the query mentions a table the role cannot touch
-  for _, tn in ipairs(ALL_TABLES) do
+  -- table grants: DEFAULT-DENY. The query may only touch tables the role
+  -- holds a grant for; the audit table is protected outright (reading it
+  -- over the wire would leak every other user's queries).
+  local protected = { RBAC_AUDIT = true }
+  for _, tn in ipairs(ALL_TABLES) do protected[tn] = true end
+  for tn in pairs(protected) do
     if has_token(U, tn) then
+      if tn == 'RBAC_AUDIT' then
+        audit('authz', sess.user, q, 'deny', 'protected table: rbac_audit')
+        return false
+      end
       local g = grants[string.lower(tn)]
       local need_write = (kind == 'WRITE')
       local ok = g and (need_write and g.write or g.read)
@@ -197,5 +222,10 @@ end
 $rbac$);
 CREATE OR REPLACE MACRO rbac2_authn(sid, ct, st) AS (luajit_s('rbac2', {op:'authn', sid:sid, client_token:ct, server_token:st})::BOOLEAN);
 CREATE OR REPLACE MACRO rbac2_authz(sid, query) AS (luajit_s('rbac2', {op:'authz', sid:sid, q:query})::BOOLEAN);
+-- persistent audit sink (read it as the operator: SELECT * FROM rbac_audit)
+CREATE TABLE IF NOT EXISTS rbac_audit (
+  seq BIGINT, ts BIGINT, kind VARCHAR, user_name VARCHAR,
+  q VARCHAR, verdict VARCHAR, detail VARCHAR
+);
 SET GLOBAL quack_authentication_function = 'rbac2_authn';
 SET GLOBAL quack_authorization_function = 'rbac2_authz';

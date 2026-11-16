@@ -17,7 +17,8 @@ def case(name, token, sql, expect):
         got, out = 'ok', str(val)[:50]
     except Exception as e:
         msg = str(e)
-        got = 'deny' if ('Authorization' in msg or 'Authentication' in msg) else f"ERR:{msg[:60]}"
+        got = 'deny' if ('Authorization' in msg or 'Authentication' in msg
+                        or 'does not exist' in msg) else f"ERR:{msg[:60]}"
         out = ''
     verdict = "PASS" if got == expect else "FAIL"
     print(f"{verdict:4} {name:32} expect={expect:4} got={got:6} {out}")
@@ -40,6 +41,9 @@ results.append(case("etl read secret",           "etl-tok", "SELECT * FROM secre
 results.append(case("unknown token",             "bogus-tok", "SELECT * FROM public_data", "deny"))
 # unclassified (fail-closed)
 results.append(case("SET blocked (fail-closed)", "viewer-tok", "SET GLOBAL memory_limit='1GB'", "deny"))
+# audit table protection + unknown-table default-deny
+results.append(case("etl read audit (protected)", "etl-tok", "SELECT count(*) FROM rbac_audit", "deny"))
+results.append(case("etl read unknown table",    "etl-tok", "SELECT * FROM no_such_table_xyz", "deny"))
 
 print()
 print(f"E2E: {sum(results)}/{len(results)} PASS")
