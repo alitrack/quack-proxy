@@ -2,6 +2,36 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r12 (2026-11-16)
+
+**结论先行**：台账里连标多轮的「内建 TLS 属需设计决策」被读成「引擎不支持 TLS、需要自行实现」，实测**这是错的**。项目 pin 的 DuckDB v2.0.0 引擎原生支持 TLS，产品 `supervisor.go` 里硬编码的 `disable_ssl = true` 是**主动关闭**，不是能力受限。本轮把这条能力事实实证并落成必需门禁，R-05 剩余决策的性质与工作量据此重估。
+
+### 边界：引擎能力 ≠ 产品功能（必读）
+
+`scripts/verify-engine-tls.sh` 直接驱动 **pinned 引擎**，不经过 quack-proxy daemon。**quack-proxy 仍然只提供明文 HTTP**，token 仍明文落在 `status.json`（0600），LAN 明文与凭据落盘风险**一个都没修**，R-05 仍**开放**。把引擎已有的 TLS 接进产品，需要甲方拍板的是**契约与运维设计**，不是实现 TLS：证书生命周期与私钥存放、向客户端分发/轮换 SHA256 指纹的通道、健康探测改 HTTPS 后的证书校验策略、`status.json` 的 `attach_sql`/token 契约、以及 `gen-proxy` 输出的 HAProxy 前端与 `proxy.ssl` 死配置如何处置。脚本含诚实性断言 `PRODUCT_DISABLES_ENGINE_TLS=1`：产品一旦真启用 TLS，此门禁会（正确地）失败，须同步更新文档与 `verify-plaintext.sh`，不得删除。
+
+### Added / Changed
+
+- **新增 `scripts/verify-engine-tls.sh`**：复用 r10 的 pinned 离线缓存（CLI `c6507206…` / 签名 `quack` `9c893bd5…` / `httpfs` `77e6c429…`，三项 SHA256 + manifest 严格校验，无下载分支）。实证：① `quack_serve` 原生带 `disable_ssl` / `ssl_cert_file` / `ssl_key_file`、`quack_query` 带 `ssl_fingerprint`；② `quack_generate_keys()` 生成自签证书与 SHA256 指纹（并用 openssl 独立验私钥）；③ `disable_ssl := true` → `http://`、`false` → `https://`；④ 独立 `openssl s_client` 完成 **TLSv1.3 / TLS_AES_256_GCM_SHA384** 握手、明文 HTTP 打 TLS 端口被拒、HTTPS GET 200；⑤ 正确指纹客户端经 TLS `SELECT 42 → 42`，错误/缺失指纹、错误 token 均被拒；⑥ 明文对照端点仍能应答（证明负例不是「服务已死」造成的假通过）。
+- **`.github/workflows/ci.yml`**：新增必需 job `engine-tls-capability`（`needs: quack-e2e`，复用**同一个** cache key 与 `QUACK_PREFETCH_OFFLINE=1` 断言）。`needs` 保证缓存已填充并保存，因此**零新增下载**、无 advisory 逃生口。所有必需门禁现为 9 个。
+- 文档口径收敛：`docs/REMEDIATION.md` / `docs/SCOPE.md` / `docs/SECURITY.md` / `docs/PRD.md` / `docs/benchmark.md` / `README.md`（含版本头、门禁数与「引擎审计不改变历史基准」的说明）。**Go 源码本轮未改动**，产品行为完全不变。
+
+### Verification（r12 实机，`--network none` 容器）
+
+- 单个无网络容器内 `ENGINE_TLS_CAPABILITY_PASSED`、RC=0：三 SHA256 `OK`、`OFFLINE_CACHE_USED=1`、`ENGINE_VERSION=v2.0.0 (Cyanoptera) d54cbbe3df`、`SIGNED_CORE_EXTENSION_LOADED=1`、`ENGINE_URL_SCHEME_SWITCH=1`、`TLS_HANDSHAKE_OK=1 (TLSv1.3)`、`FINGERPRINT_PINNED_QUERY_OK=1`、4 个负例标记全部为 1、`PRODUCT_DISABLES_ENGINE_TLS=1`。
+- **4 个负例全部非零退出且无 PASS 标记**：`--control-variant`（TLS 端点强制成明文）→ `FAIL: TLS endpoint did not report an https:// URL (got 'http://…')`、rc=1；`QUACK_TLS_OFFLINE=1` 无 `--cache-dir` → rc=1；篡改 `httpfs` 缓存 → `FAIL: offline cache missing/corrupt`、rc=1；空缓存 → rc=1。变体负例证明 URL 判别断言非空转。
+- 下载踩坑（复现 r10 结论）：GitHub release 与扩展 CDN 在本机/容器通道均约 18 KB/s 且反复断流，`prefetch-quack-e2e.sh` 的单连接重试 11 分钟后失败。改用 8 并发 1 MB 显式 `Range` 分段 + 逐段长度校验 + 逐段重试，CLI 24 MB 与 `quack` 19 MB 全部拼齐；`httpfs` 又在尾段（第 9 片）断流，按 r10 记录用精确 `Range: bytes=8388608-8657468` 单独取回 268861 字节。**下载慢 ≠ 拿不到**。四个产物（含 CLI tar）的 SHA256 与项目 pin 逐一比对通过。
+- 回归：12 个脚本 `bash -n`、三份 YAML `yaml.v3` 实解析、`git diff --check` 干净；`gofmt` / `go vet` / `go test ./... -race -count=1` 5 包全绿、总计 **70.9%**；linux/darwin/windows 交叉构建通过。
+
+#### 仍未完成（如实）
+
+- **R-05 产品接线与 token 不落盘**：属需甲方拍板的设计决策（清单见上）。`plaintext-audit` 与 `engine-tls-capability` 都只证明事实、不修风险。
+- **真 HA**：属新产品立项（control plane 冗余 / 跨机发现 / Coordinator 常驻），需重做含验收标准的 PRD + 架构 RFC。
+- **r10 残余风险**：CI 首次 cache miss 仍需 runner 访问上游一次（带重试、无 advisory 逃生口）；缓存命中后测试进程零网络。
+- **r12 新解除**：「内建 TLS 是否属于能力受限」这一前提已澄清（引擎支持，产品主动关闭）。
+
+---
+
 ## Unreleased — remediation r11 (2026-11-16)
 
 把台账里最后一项被标为「需真实浮动 IP / 双机网络」的 **HAProxy + VIP 联调**做成实证与必需门禁。此前把它当成环境做不到，实际是没试：一个 Docker user-defined bridge + `NET_ADMIN` 就足以在两容器间漂移真实的 `/32` 浮动 IP，靠 gratuitous ARP 让客户端收敛。

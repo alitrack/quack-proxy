@@ -15,6 +15,11 @@
 # Since r11 the required `vip-failover` job drives the generated HAProxy
 # config through a real floating-IP move between two containers; it also
 # proves that failover does NOT preserve sessions/data (R-04).
+# Since r12 the required `engine-tls-capability` job proves with the same
+# pinned engine that Quack NATIVELY supports TLS (TLSv1.3 handshake, cert
+# fingerprint pinning) while quack-proxy's boot SQL hardcodes
+# disable_ssl=true. This is an engine audit, NOT a product fix: R-05 stays
+# open. It reuses quack-e2e's cache via `needs`, so it adds ZERO downloads.
 name: CI
 
 on:
@@ -121,6 +126,49 @@ jobs:
         env:
           QUACK_E2E_OFFLINE: '1'
         run: bash scripts/quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache" --benchmark 50
+
+  engine-tls-capability:
+    name: engine TLS capability audit (R-05)
+    runs-on: ubuntu-latest
+    # Required gate (r12). Honesty guard for the R-05 ledger: "built-in TLS"
+    # used to be lumped into "needs a design decision", which reads like a
+    # capability limit. It is not. Using the EXACT SAME pinned v2.0.0 engine
+    # and signed extensions as quack-e2e, this proves Quack natively serves
+    # HTTPS (TLSv1.3), rejects plaintext on that port, and pins the client to
+    # the server certificate fingerprint -- while quack-proxy's boot SQL
+    # deliberately hardcodes disable_ssl = true.
+    #
+    # SCOPE, do not overstate: this is an ENGINE capability audit. It does NOT
+    # mean quack-proxy terminates TLS, does NOT change product behaviour, and
+    # does NOT fix the LAN cleartext or token-at-rest risks (R-05 remains
+    # OPEN). Shipping TLS is a product design decision: certificate lifecycle
+    # and fingerprint delivery to clients, health checks over HTTPS, the
+    # status.json contract and the generated HAProxy config. If TLS is ever
+    # enabled in the product, this gate is EXPECTED to fail (it asserts the
+    # hardcoded disable_ssl=true); update the gate and docs together, same
+    # contract as plaintext-audit.
+    #
+    # Zero new downloads: `needs: quack-e2e` guarantees the SHA256-pinned
+    # cache has already been filled and saved, and the identical cache key
+    # restores it. A strict offline assertion makes any cache miss a loud
+    # failure instead of a silent network fallback. No advisory escape hatch.
+    needs: quack-e2e
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: restore pinned engine cache (filled by quack-e2e)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/quack-e2e-cache
+          key: quack-e2e-v2.0.0-cli-c6507206-quack-9c893bd5-httpfs-77e6c429-v2
+          restore-keys: |
+            quack-e2e-v2.0.0-
+      - name: assert cache complete without network
+        run: QUACK_PREFETCH_OFFLINE=1 bash scripts/prefetch-quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
+      - name: prove engine-native TLS (strictly offline)
+        env:
+          QUACK_TLS_OFFLINE: '1'
+        run: bash scripts/verify-engine-tls.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
 
   crash-drill:
     name: daemon crash drill (R-01 / R-22)

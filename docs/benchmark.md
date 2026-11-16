@@ -207,3 +207,18 @@ SHA256 校验的 pinned 产物（CLI + 签名 `quack` + 签名 `httpfs`），再
 job **自 r10 起在所有事件（含 PR）都是必需门禁**，跑 50 次；r8 曾仅在 PR 上为
 advisory。r10 在无网络容器中的 50 次实测为 230 ms（~217 qps），口径与本节相同
 但环境不同，不应直接比较。
+
+---
+
+## 2026-11-16 补充：r12 引擎 TLS 能力实证不影响上述基准
+
+`scripts/verify-engine-tls.sh`（必需 CI job `engine-tls-capability`）复用同一套
+pinned v2.0.0 CLI + 签名 `quack` / `httpfs` 缓存，在 `--network none` 容器内证明
+引擎原生支持 TLS（`disable_ssl := false` → `https://`、TLSv1.3 握手、证书指纹
+pinning），并断言产品 boot SQL 仍硬编码 `disable_ssl = true`。
+
+**这是引擎能力审计，不是产品改动，也不是新的性能测量**：它没有改动 daemon、
+没有改动本节任何测量路径，也没有产出可比的 QPS / 延迟数字。因此本文所有历史
+与整改后基准数字**保持不变**，且不得被解读为「开启 TLS 后的性能」。若将来甲方
+决定把 TLS 接进产品，必须重新跑一套独立的 TLS 开/关对比基准（含握手、证书
+校验与 `ssl_fingerprint` 开销），再另行记录；本节在此之前不提供 TLS 性能结论。

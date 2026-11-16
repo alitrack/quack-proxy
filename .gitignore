@@ -17,3 +17,7 @@ Thumbs.db
 *.pid
 status.json
 dist/
+
+# Round-local verification caches (pinned DuckDB engine, ~100 MB).
+# Keep these OUTSIDE the repo; never commit them.
+qp-r*/

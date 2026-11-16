@@ -490,15 +490,17 @@ Verified on real systemd 255 (3/3) and enforced as a required CI job.
 **CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs gofmt,
 `go vet`, `go test -race -cover` with a coverage gate (Go 1.25 / 1.26 / 1.27),
 a **required** version-pinned `govulncheck` job (go1.27.4, zero-finding
-baseline), Linux + Windows cross-builds, the Python splitter suite, and eight
+baseline), Linux + Windows cross-builds, the Python splitter suite, and nine
 **required** real-system gates: `crash-drill` (daemon SIGKILL / R-22),
 `deploy-verify` (`scripts/verify-deploy.sh`: real `haproxy -c -f`, live
 forwarding, `systemd-analyze verify`, each with a negative control, plus the
 R-23 hardening check), `systemd-drill` (above), `vuln-scan`,
 `plaintext-audit` (below), `windows-runtime-guard` (a real
 windows-latest runner proves the cross-compiled binary refuses to start
-honestly, R-18), `quack-e2e` (strictly-offline real engine, below), and
-`vip-failover` (real HAProxy + floating IP, below). **Releases publish
+honestly, R-18), `quack-e2e` (strictly-offline real engine, below),
+`vip-failover` (real HAProxy + floating IP, below), and
+`engine-tls-capability` (r12: strictly-offline proof that the **pinned
+DuckDB v2.0.0 engine** natively supports TLS, below). **Releases publish
 linux/darwin only**; the Windows build
 is a source-compatibility check, not a supported artifact. The **real
 DuckDB + Quack E2E job** is **required on every event, including pull
@@ -563,6 +565,25 @@ This is an **audit, not a fix**: it asserts a known weakness. If TLS
 termination is ever added, the job will (correctly) fail and the assertions
 plus docs must be updated together — do not delete the gate.
 
+**Engine TLS capability (r12, R-05):** `scripts/verify-engine-tls.sh` is a
+required CI job that reuses `quack-e2e`'s pinned, SHA256-verified offline
+cache and runs in `--network none`. It proves that the **engine** this project
+ships against natively supports TLS: `quack_serve(disable_ssl := false,
+ssl_cert_file := ..., ssl_key_file := ...)` returns an `https://` endpoint,
+`openssl s_client` completes a TLSv1.3 handshake, and a client pinned to the
+certificate's SHA256 fingerprint gets `42` back; wrong fingerprint, missing
+fingerprint and wrong token are all rejected, while a plaintext control
+endpoint still answers (so the negatives are not just "the service died").
+The job also asserts that the product boot SQL still hardcodes
+`disable_ssl = true`. **Read this as an engine audit, not a product feature:**
+quack-proxy still serves plaintext HTTP and still writes the token to
+`status.json`. The earlier wording "built-in TLS needs a design decision"
+sounded like an engine limitation; r12 corrects that — the remaining work is
+product wiring (certificate lifecycle, fingerprint distribution, HTTPS health
+probe, `status.json` contract, `gen-proxy` frontend), which is an owner
+decision. See [SECURITY.md](docs/SECURITY.md) and
+[docs/REMEDIATION.md](docs/REMEDIATION.md) §2 R-05.
+
 ### Testing
 
 This project started as a rapid prototype — the initial development cycle
@@ -603,6 +624,17 @@ Three verification layers close the old "testing illusion" gap (R-15):
   an isolated HOME. `QUACK_E2E_OFFLINE=1` makes a bad cache a hard failure.
   r10 proof: a single `--network none` container ran the whole chain to
   `ALL_QUACK_E2E_CHECKS_PASSED` plus 4 negative controls.
+- `scripts/verify-engine-tls.sh` (r12) reuses that same pinned cache, runs
+  strictly offline, and proves the engine's native TLS capability: an
+  `https://` Quack endpoint, a TLSv1.3 handshake, and a correct-fingerprint
+  `quack_query` returning `42`. Three rejection negatives (wrong fingerprint,
+  missing fingerprint, wrong token) are paired with a plaintext control
+  endpoint that must still answer, so the rejections cannot be explained by a
+  dead service; a separate `--control-variant` run must exit non-zero. It also
+  asserts the product still hardcodes `disable_ssl = true`. Required CI job
+  `engine-tls-capability` (`needs: quack-e2e`, so it adds zero downloads).
+  **This is an engine capability audit, not a product TLS fix** — R-05 stays
+  open; see the LAN cleartext section above.
 - `scripts/daemon-crash-drill.sh` SIGKILLs a real daemon and asserts that a
   restart is **refused** while the orphaned shard still owns the port. Before
   the fix, the new daemon reported `healthy` because the orphan answered the

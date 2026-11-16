@@ -2,7 +2,7 @@
 
 > Product Requirements Document | 原始稿 v0.1 | 2026-05-29
 > Author: alitrack
-> 状态修订 2026-11-13（依据六领域专家评审）
+> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-16（r12：引擎原生 TLS 能力实证，见下表「内建 TLS 能力边界」与 §4.1）
 >
 > **本文不再作为愿景稿使用。** 原始 v0.1 内容保留作背景，但所有功能声明必须对照下表与 `docs/SCOPE.md`。凡标记「未实现 / 已放弃」的条目，README 不得再作为既有能力宣传。边界与成功判据以 `SCOPE.md` 为准，缺陷与整改进度以 `REMEDIATION.md` 为准。
 
@@ -31,7 +31,8 @@
 | 生成的 HAProxy 配置以 root 运行 | — | **已补齐可验证加固路径（默认 opt-in）** | r6 发现真实 HAProxy 3.4.7 启动告警；r7 新增 `proxy.hardened: true` 输出生效的 `chroot` / `user` / `group`，`scripts/verify-hardening.sh` 预置账号目录并用真实 HAProxy 验证降权 + 转发（3.4.7 3/3、2.8.31 1/1）。默认仍为 false：负例证明注入未预置主机会让 HAProxy 拒绝启动（R-23） |
 | 非 root systemd 安装演练 | §3.3 §6 | **已实机通过（r7）** | `scripts/systemd-install-drill.sh` 在真实 systemd 255 PID 1 安装 shipped unit 并启停，验证账户、`RuntimeDirectory`、0600 文件、healthy、脱敏与全量清理，带「无 RuntimeDirectory 必失败」负例；3/3 通过，CI 必需 job `systemd-drill`。r6 的「环境无 systemd」结论作废 |
 | 漏洞扫描与发布工具链 | — | **已收口（r7）** | `go1.26.11` 的 11 项 stdlib 告警在 `go1.27.4` 下清零；必需 `vuln-scan` job + release 固定 `go1.27.4`；CI 矩阵 1.25 / 1.26 / 1.27（R-14） |
-| LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复**，`disable_ssl` 硬编码仍属需设计决策（R-05） |
+| LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复** |
+| 内建 TLS 能力边界 | §4.1 | **已实证引擎能力（产品仍未启用）** | r12：`scripts/verify-engine-tls.sh` 用 pinned v2.0.0 引擎在 `--network none` 容器内证明 `disable_ssl=false` → `https://`、TLSv1.3 握手、`quack_generate_keys()` 自签证书与客户端 `ssl_fingerprint` 校验全链路可用。`supervisor.go` 硬编码 `disable_ssl=true` 是**产品主动关闭**，不是引擎不支持。更正旧口径「内建 TLS 属需设计决策（隐含能力受限）」：剩余是**产品接线设计决策**（证书/指纹分发、健康探测、status.json 契约、HAProxy），需甲方拍板。必需 CI job `engine-tls-capability` 含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言。**不得据此认为 quack-proxy 已具备 TLS**（R-05） |
 | 真实引擎 E2E 在 CI 的门禁范围 | — | **全部必需（r10）** | r8 曾把 `continue-on-error` 收紧为仅 PR advisory；r10 移除该逃生口。新增 `scripts/prefetch-quack-e2e.sh` + SHA-pinned `actions/cache`，把 pinned CLI / `quack` / `httpfs` 做成离线缓存；测试进程 `QUACK_E2E_OFFLINE=1` 严格离线，缓存缺失即硬失败。**PR 也为必需**。如实保留：首次 cache miss 仍需 runner 访问上游一次 |
 | Windows 发布产物 | §7 §8 §10 | **已撤下（r9）** | 真实 Windows 实证后从 `release.yml` 移除 windows/amd64 与 `.zip` 打包；CI 保留交叉编译，二进制启动即显式拒绝。必需 job `windows-runtime-guard` 守住该行为（R-18） |
 | 真实引擎 E2E 完整复跑 | — | **已通过（r9），r10 收紧口径** | r9：主机 HTTPS 取 pinned DuckDB v2.0.0 CLI（SHA256 与脚本 pin 一致）+ 官方签名 core 扩展，喂入容器后 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 207 ms / ~241 qps）。**r10 更正**：r9 的容器仍联网、由 DuckDB autoload 下载了 `httpfs`，严格来说不是「离线」。r10 首次用 `--network none` 复跑，发现磁盘库报 `read-only crypto module loaded`，据此把 `httpfs` 也 pin 进缓存，并在单个无网络容器内再次跑到 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 230 ms / ~217 qps）+ 4 个负例 |
@@ -211,6 +212,8 @@ proxy:
 ```
 
 > **实现状态**：`proxy.ssl` 在 `internal/config/config.go` 中定义，但 `internal/proxy/haproxy.go` 与 supervisor 均未读取；同时 `supervisor.go` 硬编码 `disable_ssl=true`。该配置项当前**完全无效**，不得据此认为启用了 TLS。见 R-05。
+>
+> **r12 补充（影响甲方决策）**：这里的 `disable_ssl=true` 不是引擎能力限制。pinned DuckDB v2.0.0 的 Quack 扩展原生支持 HTTPS（`disable_ssl=false` + `ssl_cert_file`/`ssl_key_file` + 客户端 `ssl_fingerprint`），已由 `scripts/verify-engine-tls.sh` 在严格离线容器内实证（TLSv1.3 握手 + 指纹校验 + 4 个负例）。因此「是否启用 TLS」不是「能否实现」，而是产品接线与运维契约的设计决策：证书生命周期与私钥存放、向客户端分发/轮换 SHA256 指纹的通道、健康探测改 HTTPS、`status.json` 的 `attach_sql`/token 契约、`gen-proxy` 输出的 HAProxy 前端与 `proxy.ssl` 死配置。本轮不改产品行为，R-05 仍开放。
 
 ### 4.2 Token 安全模型
 

@@ -1,6 +1,6 @@
 # quack-proxy 范围声明（SCOPE）
 
-> 版本 v0.2.0-r11 | 2026-11-16 | 状态：**已确认；Gate 0 / Gate 1 / Gate 2 实质过门；R-21 停止回收、R-07 reload 字段 diff、R-22 孤儿端口假阳性均已修复并复验；部署产物已用厂商真实二进制校验，systemd 非 root 实机安装演练通过，R-23 有可验证的加固路径，govulncheck 基线清零并转必需；R-05 的 LAN 明文风险已用真实抓包实证并落成必需门禁（风险本身仍在，属需设计决策）；R-18 已收口——真实 Windows 实证后撤下发布产物、修复跨平台可执行判定、加显式运行时拒绝与必需门禁；r10 起 `quack-e2e` 在 PR 上也不再 advisory，改用 SHA256 校验的离线缓存并由 `--network none` 实证；同时更正 r9「离线」口径，明确完全离线部署需预装 `quack` + `httpfs`；r11 补齐 HAProxy + VIP 真实联调并转必需门禁，但**这只验证生成配置在浮动 IP 入口下可用，不代表 quack-proxy 具备 HA**（VIP 由外部编排，切换后会话/数据不连续，R-04 仍成立）**
+> 版本 v0.2.0-r12 | 2026-11-16 | 状态：**已确认；Gate 0 / Gate 1 / Gate 2 实质过门；R-21 停止回收、R-07 reload 字段 diff、R-22 孤儿端口假阳性均已修复并复验；部署产物已用厂商真实二进制校验，systemd 非 root 实机安装演练通过，R-23 有可验证的加固路径，govulncheck 基线清零并转必需；R-05 的 LAN 明文风险已用真实抓包实证并落成必需门禁（风险本身仍在）；R-18 已收口——真实 Windows 实证后撤下发布产物、修复跨平台可执行判定、加显式运行时拒绝与必需门禁；r10 起 `quack-e2e` 在 PR 上也不再 advisory，改用 SHA256 校验的离线缓存并由 `--network none` 实证；同时更正 r9「离线」口径，明确完全离线部署需预装 `quack` + `httpfs`；r11 补齐 HAProxy + VIP 真实联调并转必需门禁，但**这只验证生成配置在浮动 IP 入口下可用，不代表 quack-proxy 具备 HA**（VIP 由外部编排，切换后会话/数据不连续，R-04 仍成立）；**r12 用同一套 pinned 引擎实证 Quack 原生支持 TLS（`disable_ssl=false` → `https://`、TLSv1.3 握手、证书指纹校验），更正「内建 TLS 属需设计决策」隐含的能力受限口径 —— 引擎能力已具备，产品 `disable_ssl=true` 是主动关闭；这是引擎审计、不是产品修复，R-05 仍开放，剩余决策收窄为产品接线与运维契约**
 > 本文件是本次整改的唯一边界依据。与 README / PRD 冲突时，以本文件为准。
 
 ## 1. 一句话定位
@@ -25,7 +25,7 @@ quack-proxy 是**单机多进程 DuckDB + Quack 端点监管器**：一份 YAML 
 | 常驻 Coordinator / 统一查询入口 | 只生成 ATTACH SQL 片段，不启动 Coordinator 进程 |
 | 分布式事务、自动分片 | 由 DuckDB ATTACH 与用户自行决定 |
 | **多分片放进一个 LB backend** | 单机不存在副本：不同 `.db` 是分片（轮询结果不确定），相同 `.db` 会触发 DuckDB 文件锁冲突（v2.0.0 实测）。`gen-proxy` 只允许单分片端口转发（R-04） |
-| 内建 TLS 终止 | `proxy.ssl.enabled: true` 在加载期报错；由外部代理终止 |
+| 内建 TLS 终止 | `proxy.ssl.enabled: true` 在加载期报错；由外部代理终止。**r12 更正**：引擎（pinned v2.0.0 Quack）原生支持 TLS，产品 `supervisor.go` 硬编码 `disable_ssl = true` 是主动关闭而非能力受限。启用它属产品接线设计决策（证书/指纹分发、健康探测、status.json 契约、HAProxy），不是本次整改范围 |
 | 自动安装 DuckDB 扩展 | boot SQL 只 `LOAD quack`；扩展须由运维预装并校验签名（见 §5） |
 | Web UI | CLI only |
 
@@ -98,10 +98,11 @@ quack-proxy 是**单机多进程 DuckDB + Quack 端点监管器**：一份 YAML 
 | 2026-11-15 | **advisory 只保留在 PR 路径**（**r10 已取代，历史记录**） | `quack-e2e` 依赖 GitHub Releases 与扩展 CDN（实测 502）。脚本加 3 次下载/安装重试后，CI 改为仅 `pull_request` 事件 advisory；`push main` 与 `workflow_dispatch` 为必需门禁，主分支不得静默跳过真实引擎校验 |
 | 2026-11-16 | **advisory 全部取消，`quack-e2e` 转严格离线** | 清单里最后一项「本环境能做却一直被当作做不到」。新增 `prefetch-quack-e2e.sh` 在 runner 上一次性预取并校验 CLI + `quack` + `httpfs`，`actions/cache` 复用；测试进程 `QUACK_E2E_OFFLINE=1` 下无 `curl` / 无 `INSTALL`，缓存缺失或损坏即硬失败。CI 移除 `continue-on-error`，PR 也为必需。残余风险如实保留：首次 cache miss 仍需上游一次，但不再有逃生口 |
 | 2026-11-16 | **「离线」必须指运行离线，不只是产物离线** | r9 的 E2E 产物是离线的，但容器仍联网、由 DuckDB autoload 下载 `httpfs`。`--network none` 复跑才暴露磁盘库分片报 `read-only crypto module loaded`。判别：`:memory:` 正常、磁盘库失败。修法是把 `httpfs` 一并 pin 进缓存，并把结论写成与证据等宽的口径 |
+| 2026-11-16 | **不在本轮启用产品 TLS；但必须把「能力受限」口径更正** | R-05 连标多轮「内建 TLS 属需设计决策」，读起来像引擎不支持。r12 用 pinned v2.0.0 引擎实证 `disable_ssl=false` → `https://`、TLSv1.3 握手、`quack_generate_keys()` + `ssl_fingerprint` 校验全链路可用；`supervisor.go` 的 `disable_ssl=true` 是产品主动关闭。因此剩余决策不是「实现 TLS」，而是「把已有能力接进产品」的契约设计（证书/指纹分发、健康探测、status.json、HAProxy），须甲方拍板，工作量与风险边界完全不同。落成必需门禁 `engine-tls-capability` 并含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言，防止把引擎审计读成产品已具备 TLS |
 | 2026-11-13 | release 用 cosign keyless OIDC 签 `SHA256SUMS`，Actions 全 SHA pin | 单有 SHA256SUMS 只是完整性，不是真实性（R-14） |
 | 2026-11-13 | 真 HA（control plane 冗余、跨机发现、Coordinator 常驻）**不列入本次整改** | 属新产品立项，需含验收标准的 PRD + 架构 RFC |
 
-## 8. 验证记录（2026-11-13 ~ 11-15 实机）
+## 8. 验证记录（2026-11-13 ~ 11-16 实机）
 
 环境：Windows 主机（便携 Go 1.25.0）+ Docker `golang:1.25`（Linux，go1.25.14，gcc 可用）。WSL 被安全策略禁用，改用容器。
 
@@ -136,7 +137,7 @@ quack-proxy 是**单机多进程 DuckDB + Quack 端点监管器**：一份 YAML 
 | **r10 无网络容器全链路 + 4 个负例** | 单个 `--network none` 容器：prefetch miss/hit/严格离线断言全通（CLI `c6507206…`、`quack` `9c893bd5…`、`httpfs` `77e6c429…` 三个 SHA256 均 `OK`、`OFFLINE_CACHE_USED=1`）；`QUACK_E2E_OFFLINE=1 --benchmark 50` → `ALL_QUACK_E2E_CHECKS_PASSED`（50 SELECT 230 ms ~217 qps、正确/错误 token、healthy、停止无孤儿）。4 个负例（空缓存 / 无 cache-dir / 篡改 httpfs / prefetch 离线断言）全部非零退出且无 `all shards started`。判别负例：不预装 httpfs 时无网络磁盘库写失败，`:memory:` 正常 |
 | **r11 HAProxy + VIP 真实联调**（`scripts/verify-vip-failover.sh`，必需 CI job `vip-failover`） | Docker bridge 上两个 `haproxy:2.8-alpine` 节点（`--user root` + `NET_ADMIN`）各跑真实 HAProxy + 独立 stub；真实 CLI 生成的 1004 B 配置经 `haproxy -c -f` 接受并实际转发。真实 `/32` VIP 由 A 漂移到 B（GARP，客户端不做 ARP flush）：`VIP_PRIMARY_NODE=NODE_A` → `VIP_FAILOVER_NODE=NODE_B`，`SESSION_DISCONTINUITY=1` → `VIP_FAILOVER_DRILL_PASSED`。负例：VIP 无人持有 / VIP 撤下后必须不通、多分片配置被 `gen-proxy` 拒绝、坏配置被 `haproxy -c` 拒绝；另做变体负例（两节点同标识 → 脚本 rc=1）证明身份断言非空转。两个不同网段各通过一次、退出无残留。**边界**：VIP 由脚本模拟（keepalived / 云浮动 IP 替身），产品不提供也不感知；入口恢复但会话与数据不连续，R-04 / R-05 均未修复 |
 
-**仍未做的验收**：R-05 的 `disable_ssl` 硬编码 / token 不落盘 / 内建 TLS 属**需设计决策**（r8 的抓包门禁只证明弱点、不修风险；r11 的 VIP 联调同样不修）；真 HA 属新产品立项。**r11 已解除**：HAProxy + VIP 联调（Docker bridge 双容器即可实证，不必等物理浮动 IP；但口径是「生成配置在浮动 IP 入口下可用」，**不是**产品具备 HA，脚本实证 `SESSION_DISCONTINUITY=1`）。r10 如实保留的残余风险：CI 首次 cache miss 仍需访问上游一次（runner 侧、带重试），缓存命中后测试进程零网络。**r10 已解除**：`quack-e2e` 在 PR 上的 advisory。**r9 已解除**：Windows 产物去留（已撤下发布产物并落成必需门禁）、真实引擎 E2E 完整复跑（r10 进一步收紧为严格离线）。**r8 已解除**：LAN 明文抓包实证。**r7 已解除**：非 root systemd 安装演练、R-23 生产加固、govulncheck 基线清零转必需。
+**仍未做的验收**：R-05 的 `disable_ssl` 硬编码 / token 不落盘 / **产品接入 TLS** 属**需设计决策**（r8 的抓包门禁、r11 的 VIP 联调、r12 的引擎能力审计都只证明事实、不修风险）。**r12 已解除「引擎是否支持 TLS」这一隐含前提**：`scripts/verify-engine-tls.sh` 在 `--network none` 容器内用 pinned v2.0.0 引擎证明 `disable_ssl=false` 可起 HTTPS（TLSv1.3）、`quack_generate_keys()` 生成自签证书、客户端 `ssl_fingerprint` 校验生效，且断言产品仍硬编码 `disable_ssl=true`（`PRODUCT_DISABLES_ENGINE_TLS=1`）。剩余决策收窄为产品接线契约：证书生命周期与私钥存放、指纹分发/轮换通道、健康探测改 HTTPS、`status.json` 契约、`gen-proxy` 的 HAProxy 前端与 `proxy.ssl` 死配置。**不得据此宣称 quack-proxy 已具备 TLS**。真 HA 属新产品立项。**r11 已解除**：HAProxy + VIP 联调（Docker bridge 双容器即可实证，不必等物理浮动 IP；但口径是「生成配置在浮动 IP 入口下可用」，**不是**产品具备 HA，脚本实证 `SESSION_DISCONTINUITY=1`）。r10 如实保留的残余风险：CI 首次 cache miss 仍需访问上游一次（runner 侧、带重试），缓存命中后测试进程零网络。**r10 已解除**：`quack-e2e` 在 PR 上的 advisory。**r9 已解除**：Windows 产物去留（已撤下发布产物并落成必需门禁）、真实引擎 E2E 完整复跑（r10 进一步收紧为严格离线）。**r8 已解除**：LAN 明文抓包实证。**r7 已解除**：非 root systemd 安装演练、R-23 生产加固、govulncheck 基线清零转必需。
 
 **r8 的教训与 r6/r7 不同，但同源**：r5~r7 把「LAN 明文抓包」写成未做，并没有说「环境不允许」——只是没做。本轮证明两台容器 + 一个 `AF_PACKET` 原始套接字就能实证，不需要第二台物理机。前两轮是「通道/参数受限误记为能力受限」，这一轮是「**未做被清单化后默认成了做不到**」。清单里的「未做」必须逐条问一句「现在真的做不到吗」。
 
