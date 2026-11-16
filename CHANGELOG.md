@@ -2,6 +2,61 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r13 (2026-11-16)
+
+**结论先行**：r12 让 `engine-tls-capability` 依赖 `quack-e2e` 产出的同一个
+SHA256-pinned 缓存，但这条「串联契约」只写在 CI 注释与文档里 —— 将来谁改了
+pin / cache key / `needs` / 离线开关，没有任何门禁会当场拒绝，只能等 PR 红掉
+再猜原因。本轮把它做成 **Go 套件里的机器可验证契约**，随已必需的
+`go test ./...` 自动执行（Go 1.25 / 1.26 / 1.27 矩阵，`-race`），零新增 CI job、
+零新增下载。同时按 CI 真实顺序在单个无网络容器里复跑了整条链路。
+
+### Added
+
+- **新增 `internal/cicontract`**（`contract.go` + `contract_test.go`）：用项目已有
+  的 `gopkg.in/yaml.v3` 解析真实 `.github/workflows/ci.yml` 与 `release.yml`，断言
+  ① 9 个必需门禁 job 全部存在；② 无 job/step 级 `continue-on-error`、无 job 级
+  `if`（必需门禁不可被跳过）；③ 两个工作流的所有 `uses:` 均为 40 位 hex 完整
+  commit SHA；④ 所有引用 `quack-e2e-cache` 的 `actions/cache` 步骤使用**完全相同**
+  的 `path` 与 `key`，且 key 仍含从 `scripts/prefetch-quack-e2e.sh` 读出的三个
+  SHA256 pin 前缀（改 pin 不换 key 会直接编译期失败）；⑤ `engine-tls-capability`
+  的 `needs` 含 `quack-e2e`；⑥ `QUACK_E2E_OFFLINE` / `QUACK_TLS_OFFLINE` / 两个
+  `QUACK_PREFETCH_OFFLINE=1` 断言在 CI 里确实设置。
+- **9 个负例**：对真实 YAML 做单点篡改（改 `needs`、只改下游 cache key、把 key
+  换成不含 pin 的值、关掉离线开关、加回 advisory、加 `if` 让门禁可跳过、删掉一个
+  门禁 job、把 action 改成 tag pin、改 release 工作流的 action pin），每个负例要求
+  **恰好对应的那一个检查失败、其余检查仍通过** —— 证明契约检查不是恒真式。
+
+### Verification（r13 实机）
+
+- `--network none` 容器按 CI 真实顺序跑完整链路，3/3 RC=0：
+  `QUACK_PREFETCH_OFFLINE=1 prefetch-quack-e2e.sh` → `PREFETCH_CACHE_HIT`
+  （三 SHA256 `OK`）；`QUACK_E2E_OFFLINE=1 quack-e2e.sh --benchmark 50` →
+  `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 203 ms / ~246 qps、正确/错误 token、HTTP
+  200、healthy、停止后端口释放无孤儿）；`QUACK_TLS_OFFLINE=1
+  verify-engine-tls.sh` → `ENGINE_TLS_CAPABILITY_PASSED`。输出
+  `OFFLINE_CI_CHAIN_PASSED`。这证明 `needs: quack-e2e` + 同一 cache key 的串联
+  设计在严格离线下成立，不只是两个脚本各自能跑。
+- Go 回归：`gofmt` / `go vet` / `go test ./... -race -count=1` **6 包全绿**、
+  **74** 个测试函数、`go tool cover` 总计 **72.2%**（新增 `cicontract` 80.5%）；
+  linux/amd64、darwin/amd64、darwin/arm64、windows/amd64 交叉构建通过；
+  9 个负例全通过；`git diff --check` 干净。
+- 静态审计：两个工作流共 **28** 处 `uses:`（`ci.yml` 23 + `release.yml` 5）
+  **全部**为 40 位 hex SHA pin，无 `continue-on-error`、无 `if:`，与
+  README/SECURITY 的既有声明一致。
+
+### 边界（不得扩张）
+
+- 这是**契约/配置检查**，不是新的必需门禁，也不是产品功能：必需门禁仍是 9 个，
+  Go 产品源码、daemon 行为、引擎产物、风险状态**完全未变**。R-05 仍**开放**
+  （明文 HTTP + token 落盘），真 HA 仍属新产品立项，r10 的「CI 首次 cache miss
+  仍需上游一次」残余风险**未被消除**（本轮只证明缓存命中后的三段链路严格离线）。
+- 契约检查故意不解析 YAML 语义全量，只覆盖「门禁必需性 + 供应链 pin + 共享缓存
+  一致性」；新增门禁或改 job 名时必须同步 `RequiredGates`，否则测试会（正确地）
+  失败。
+
+---
+
 ## Unreleased — remediation r12 (2026-11-16)
 
 **结论先行**：台账里连标多轮的「内建 TLS 属需设计决策」被读成「引擎不支持 TLS、需要自行实现」，实测**这是错的**。项目 pin 的 DuckDB v2.0.0 引擎原生支持 TLS，产品 `supervisor.go` 里硬编码的 `disable_ssl = true` 是**主动关闭**，不是能力受限。本轮把这条能力事实实证并落成必需门禁，R-05 剩余决策的性质与工作量据此重估。

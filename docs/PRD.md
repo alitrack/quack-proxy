@@ -2,7 +2,7 @@
 
 > Product Requirements Document | 原始稿 v0.1 | 2026-05-29
 > Author: alitrack
-> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-16（r12：引擎原生 TLS 能力实证，见下表「内建 TLS 能力边界」与 §4.1）
+> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-16（r13：CI 门禁契约机器可验证，见下表「CI 门禁契约」；r12 引擎原生 TLS 能力实证见「内建 TLS 能力边界」与 §4.1）
 >
 > **本文不再作为愿景稿使用。** 原始 v0.1 内容保留作背景，但所有功能声明必须对照下表与 `docs/SCOPE.md`。凡标记「未实现 / 已放弃」的条目，README 不得再作为既有能力宣传。边界与成功判据以 `SCOPE.md` 为准，缺陷与整改进度以 `REMEDIATION.md` 为准。
 
@@ -34,6 +34,7 @@
 | LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复** |
 | 内建 TLS 能力边界 | §4.1 | **已实证引擎能力（产品仍未启用）** | r12：`scripts/verify-engine-tls.sh` 用 pinned v2.0.0 引擎在 `--network none` 容器内证明 `disable_ssl=false` → `https://`、TLSv1.3 握手、`quack_generate_keys()` 自签证书与客户端 `ssl_fingerprint` 校验全链路可用。`supervisor.go` 硬编码 `disable_ssl=true` 是**产品主动关闭**，不是引擎不支持。更正旧口径「内建 TLS 属需设计决策（隐含能力受限）」：剩余是**产品接线设计决策**（证书/指纹分发、健康探测、status.json 契约、HAProxy），需甲方拍板。必需 CI job `engine-tls-capability` 含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言。**不得据此认为 quack-proxy 已具备 TLS**（R-05） |
 | 真实引擎 E2E 在 CI 的门禁范围 | — | **全部必需（r10）** | r8 曾把 `continue-on-error` 收紧为仅 PR advisory；r10 移除该逃生口。新增 `scripts/prefetch-quack-e2e.sh` + SHA-pinned `actions/cache`，把 pinned CLI / `quack` / `httpfs` 做成离线缓存；测试进程 `QUACK_E2E_OFFLINE=1` 严格离线，缓存缺失即硬失败。**PR 也为必需**。如实保留：首次 cache miss 仍需 runner 访问上游一次 |
+| CI 门禁契约 | — | **已机器可验证（r13）** | `internal/cicontract` 随已必需的 `go test ./...` 解析真实 `ci.yml` / `release.yml`，断言 9 个门禁齐全、无 `continue-on-error` / 无 job 级 `if`、全部 `uses:` 为 40 位 hex SHA、两个共享缓存步骤 `path`/`key` 一致且 key 含三个 pin 前缀、`engine-tls-capability` 的 `needs` 含 `quack-e2e`、离线开关齐全；9 个单点篡改负例保证断言非空转。三段链路在单个 `--network none` 容器按 CI 顺序 3/3 RC=0。**不是第 10 个门禁**、不改产品行为、**不消除** r10 的首次 cache miss 依赖 |
 | Windows 发布产物 | §7 §8 §10 | **已撤下（r9）** | 真实 Windows 实证后从 `release.yml` 移除 windows/amd64 与 `.zip` 打包；CI 保留交叉编译，二进制启动即显式拒绝。必需 job `windows-runtime-guard` 守住该行为（R-18） |
 | 真实引擎 E2E 完整复跑 | — | **已通过（r9），r10 收紧口径** | r9：主机 HTTPS 取 pinned DuckDB v2.0.0 CLI（SHA256 与脚本 pin 一致）+ 官方签名 core 扩展，喂入容器后 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 207 ms / ~241 qps）。**r10 更正**：r9 的容器仍联网、由 DuckDB autoload 下载了 `httpfs`，严格来说不是「离线」。r10 首次用 `--network none` 复跑，发现磁盘库报 `read-only crypto module loaded`，据此把 `httpfs` 也 pin 进缓存，并在单个无网络容器内再次跑到 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 230 ms / ~217 qps）+ 4 个负例 |
 | 完全离线部署的扩展依赖 | — | **r10 新增运维约束** | DuckDB v2.0.0 写磁盘数据库必须能加载签名 core `httpfs` 提供完整 crypto 后端；只预装 `quack` 会在无网络主机上启动失败。离线部署需同时预装 `quack` + `httpfs`，`allow_unsigned_extensions` 保持 false。文件存在即可被 autoload 命中，boot SQL 无需改动 |

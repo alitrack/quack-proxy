@@ -8,7 +8,7 @@
 
 > One YAML, one command. Start and supervise multiple DuckDB + Quack endpoints on a single host.
 
-> **Status (2026-11-16, remediation r11):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All CI gates are required (no advisory left), including a strictly-offline real-engine E2E and a real HAProxy + floating-IP drill. **The VIP drill is NOT an HA feature**: the address is moved by the drill (standing in for keepalived / a cloud floating IP); after failover the client reaches a different backend (`SESSION_DISCONTINUITY=1`), so sessions and data do not survive. **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
+> **Status (2026-11-16, remediation r13):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All nine CI gates are required (no advisory left), including a strictly-offline real-engine E2E, a real HAProxy + floating-IP drill, and an engine TLS capability audit. **The VIP drill is NOT an HA feature**: the address is moved by the drill (standing in for keepalived / a cloud floating IP); after failover the client reaches a different backend (`SESSION_DISCONTINUITY=1`), so sessions and data do not survive. **The TLS audit proves the pinned DuckDB engine CAN serve HTTPS; quack-proxy still serves plaintext HTTP** and still writes the token to `status.json` (R-05 is open). **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
 
 **quack-proxy** is a lightweight Go daemon that manages multiple DuckDB+[Quack](https://duckdb.org/docs/stable/extensions/quack.html) child processes with built-in health checks, automatic restart, and HAProxy config generation. Think of it as the "systemd for DuckDB Quack endpoints" — except you configure it in one YAML file and it handles everything. It does **not** provide control-plane redundancy, automatic failover, or a unified query endpoint.
 
@@ -515,6 +515,20 @@ pinned to a full commit SHA; release binaries are built with the same patched
 `go1.27.4` toolchain the vulnerability gate checks, and release checksums are
 signed with cosign keyless OIDC (see [SECURITY.md](docs/SECURITY.md)).
 
+**The gate contract is itself tested (r13):** `internal/cicontract` parses the
+real `ci.yml` / `release.yml` inside the already-required `go test ./...` job
+and asserts that all nine gates exist, none can be skipped (`if`) or fail
+silently (`continue-on-error`), every action is SHA-pinned, both consumers of
+the pinned engine cache use the **identical path and key** (with the key still
+carrying the three SHA256 pin prefixes read from `prefetch-quack-e2e.sh`),
+`engine-tls-capability` waits for `quack-e2e`, and the offline switches are
+set. Nine negative controls mutate the real YAML one property at a time and
+require **exactly** the intended check to fail — so this is a live contract,
+not a comment. It adds no CI job and no downloads. The full CI chain
+(prefetch offline assertion → real-engine E2E → engine TLS audit) was also
+reproduced in a single `--network none` container (`OFFLINE_CI_CHAIN_PASSED`,
+3/3 RC=0).
+
 **HAProxy hardening (R-23):** the default generated config passes the vendor's
 parser but contains no active `chroot`/`user` — those need a host-local
 account and directory that quack-proxy cannot provision, and HAProxy >= 3.x
@@ -592,9 +606,9 @@ unit tests. The main bug found during that phase (signalling the bash wrapper
 orphaning the whole child tree) was caught by integration testing, not unit
 tests — a reminder that real process-management bugs need real subprocesses.
 
-The Go suite covers all five packages (71 test functions; `go test ./...`
+The Go suite covers all six packages (74 test functions; `go test ./...`
 passes clean, `go test -race` runs in CI and passes locally in a Linux
-container; total coverage 70.9% — the Windows-only runtime branch cannot be
+container; total coverage 72.2% — the Windows-only runtime branch cannot be
 exercised on a Linux runner). It exercises whole-process-group teardown, restart backoff and
 retry parking, the cold-start grace, crypto token generation, config
 validation (including injection rejection), health-check identity pinning,

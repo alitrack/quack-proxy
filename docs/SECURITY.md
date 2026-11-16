@@ -1,6 +1,6 @@
 # 安全说明（SECURITY）
 
-> 适用版本：v0.2.0 + 本次整改补丁（2026-11-16，r12）
+> 适用版本：v0.2.0 + 本次整改补丁（2026-11-16，r13）
 > 配套阅读：`SCOPE.md`（边界）、`REMEDIATION.md`（缺陷台账与状态）
 
 ## 1. 信任模型
@@ -54,6 +54,7 @@
 
 11. **VIP / 浮动 IP 不会带来数据高可用（r11 实证）**：`scripts/verify-vip-failover.sh` 在 Docker bridge 上把真实 `/32` 地址从节点 A 漂移到 B，证明 `gen-proxy` 生成的配置经得起入口切换（必需 CI job `vip-failover`）。但 **VIP 的移动由外部编排完成，quack-proxy 既不提供也不感知**；两个节点是各自独立的后端，脚本断言切换后对端身份变化（`SESSION_DISCONTINUITY=1`）——连接能重建，**会话状态与数据不连续**。多分片 VIP 后端仍被 `gen-proxy` 明确拒绝（R-04），明文传输与 token 落盘风险不因 VIP 改变（R-05）。请勿据此宣称「已具备 HA」；真 HA 需另行立项。
 12. **引擎原生 TLS 能力 ≠ quack-proxy 提供 TLS（r12 实证）**：`scripts/verify-engine-tls.sh` 用项目 pin 的 DuckDB v2.0.0 CLI + 签名 `quack` / `httpfs` 扩展，在 `--network none` 容器内证明引擎原生支持 TLS：`quack_serve(disable_ssl := false, ssl_cert_file, ssl_key_file)` 返回 `https://`，独立 `openssl s_client` 完成 TLSv1.3 握手，明文 HTTP 打该端口被拒，`quack_generate_keys()` 生成自签证书与 SHA256 指纹，客户端用正确 `ssl_fingerprint` 经 TLS 查得结果，错误/缺失指纹与错误 token 均被拒（必需 CI job `engine-tls-capability`，复用 `quack-e2e` 的 pinned 缓存，零新增下载）。**这是引擎能力审计，不是产品修复**：脚本绕过 daemon 直接驱动引擎，产品 `supervisor.go` 仍硬编码 `disable_ssl = true`，R-05 的明文与 token 落盘风险全部仍在。把能力接进产品需甲方决策：证书生命周期与私钥存放、指纹分发/轮换通道（当前 `status.json` / `attach_sql` 无此字段）、健康探测改 HTTPS 后的证书校验、`status.json` 契约、`gen-proxy` 的 HAProxy 前端与 `proxy.ssl` 死配置。**脚本含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言**：产品一旦启用 TLS，此门禁会（正确地）失败，须同步更新本文件、第 1 条、`verify-plaintext.sh` 与台账，不得删除。
+13. **CI 门禁契约是机器可验证的（r13）**：r12 之后 `engine-tls-capability` 与 `quack-e2e` 共享同一份 SHA256-pinned 缓存；若有人改了 pin 却没换 cache key、给某个 job 加 `if` 使其可跳过、把 action 改回 `@v4`、或悄悄加回 `continue-on-error`，原先**没有任何门禁会当场拒绝**（与 r5 `govulncheck` 被吞掉是同一类配置退化）。`internal/cicontract` 在已必需的 `go test ./...` 里解析真实 `ci.yml` / `release.yml`，断言 9 个门禁齐全、无 advisory、全部 `uses:` 为 40 位 hex SHA、两个缓存步骤的 `path`/`key` 完全一致且 key 含三个 pin 前缀、`engine-tls-capability` 的 `needs` 含 `quack-e2e`、离线开关已设置；9 个单点篡改负例要求恰好对应检查失败。三段链路（离线缓存断言 → 真实引擎 E2E → 引擎 TLS 审计）已在单个 `--network none` 容器按 CI 顺序 3/3 RC=0。**边界**：这是配置契约检查，**不是第 10 个必需门禁**，不改产品行为，也**不消除**第 6 条如实保留的「CI 首次 cache miss 仍需上游一次」残余风险与第 1/2 条的 R-05 风险。
 
 ## 4. 需要对外暴露时的最小检查清单
 
