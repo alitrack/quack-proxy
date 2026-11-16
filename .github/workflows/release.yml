@@ -77,6 +77,7 @@ jobs:
         with:
           path: dist
           pattern: release-dist-*
+          merge-multiple: true
 
       - name: Checksums
         working-directory: dist
