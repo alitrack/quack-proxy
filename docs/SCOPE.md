@@ -1,6 +1,6 @@
 # quack-proxy 范围声明（SCOPE）
 
-> 版本 v0.2.0-r10 | 2026-11-16 | 状态：**已确认；Gate 0 / Gate 1 / Gate 2 实质过门；R-21 停止回收、R-07 reload 字段 diff、R-22 孤儿端口假阳性均已修复并复验；部署产物已用厂商真实二进制校验，systemd 非 root 实机安装演练通过，R-23 有可验证的加固路径，govulncheck 基线清零并转必需；R-05 的 LAN 明文风险已用真实抓包实证并落成必需门禁（风险本身仍在，属需设计决策）；R-18 已收口——真实 Windows 实证后撤下发布产物、修复跨平台可执行判定、加显式运行时拒绝与必需门禁；r10 起 `quack-e2e` 在 PR 上也不再 advisory，改用 SHA256 校验的离线缓存并由 `--network none` 实证；同时更正 r9「离线」口径，明确完全离线部署需预装 `quack` + `httpfs`**
+> 版本 v0.2.0-r11 | 2026-11-16 | 状态：**已确认；Gate 0 / Gate 1 / Gate 2 实质过门；R-21 停止回收、R-07 reload 字段 diff、R-22 孤儿端口假阳性均已修复并复验；部署产物已用厂商真实二进制校验，systemd 非 root 实机安装演练通过，R-23 有可验证的加固路径，govulncheck 基线清零并转必需；R-05 的 LAN 明文风险已用真实抓包实证并落成必需门禁（风险本身仍在，属需设计决策）；R-18 已收口——真实 Windows 实证后撤下发布产物、修复跨平台可执行判定、加显式运行时拒绝与必需门禁；r10 起 `quack-e2e` 在 PR 上也不再 advisory，改用 SHA256 校验的离线缓存并由 `--network none` 实证；同时更正 r9「离线」口径，明确完全离线部署需预装 `quack` + `httpfs`；r11 补齐 HAProxy + VIP 真实联调并转必需门禁，但**这只验证生成配置在浮动 IP 入口下可用，不代表 quack-proxy 具备 HA**（VIP 由外部编排，切换后会话/数据不连续，R-04 仍成立）**
 > 本文件是本次整改的唯一边界依据。与 README / PRD 冲突时，以本文件为准。
 
 ## 1. 一句话定位
@@ -134,14 +134,17 @@ quack-proxy 是**单机多进程 DuckDB + Quack 端点监管器**：一份 YAML 
 | `go test ./... -race -count=1` / `-cover`（r9，Linux 容器） | 5 包全绿；**71** 个测试函数；`proxy` **98.3%**、`supervisor` **80.1%**、`config` 93.8%、`health` 90.9%、`cmd` 27.0%，总计 **70.9%**（较 r8 的 71.1% 略降：新增 Windows 运行时分支在 Linux 不可达）。gofmt / vet / 三平台交叉构建 / `GOOS=windows go test -c` / 9 个脚本 `bash -n` / 三份 YAML `yaml.v3` 实解析 / `git diff --check` 全绿 |
 | **r9 两条真实门禁复跑**（最终源码） | 真实 systemd 255 非 root 安装演练 `SYSTEMD_INSTALL_DRILL_PASSED`（含 `SYSTEMD_DRILL_NEGATIVE_CONTROL_OK=1`）；LAN 明文抓包 `PLAINTEXT_AUDIT_PASSED`（`PLAINTEXT_TOKEN_VISIBLE=1` / `TLS_CONTROL_HIDDEN=1` / `PRODUCT_TLS_UNAVAILABLE=1` / `STATUS_TOKEN_AT_REST=1`） |
 | **r10 无网络容器全链路 + 4 个负例** | 单个 `--network none` 容器：prefetch miss/hit/严格离线断言全通（CLI `c6507206…`、`quack` `9c893bd5…`、`httpfs` `77e6c429…` 三个 SHA256 均 `OK`、`OFFLINE_CACHE_USED=1`）；`QUACK_E2E_OFFLINE=1 --benchmark 50` → `ALL_QUACK_E2E_CHECKS_PASSED`（50 SELECT 230 ms ~217 qps、正确/错误 token、healthy、停止无孤儿）。4 个负例（空缓存 / 无 cache-dir / 篡改 httpfs / prefetch 离线断言）全部非零退出且无 `all shards started`。判别负例：不预装 httpfs 时无网络磁盘库写失败，`:memory:` 正常 |
+| **r11 HAProxy + VIP 真实联调**（`scripts/verify-vip-failover.sh`，必需 CI job `vip-failover`） | Docker bridge 上两个 `haproxy:2.8-alpine` 节点（`--user root` + `NET_ADMIN`）各跑真实 HAProxy + 独立 stub；真实 CLI 生成的 1004 B 配置经 `haproxy -c -f` 接受并实际转发。真实 `/32` VIP 由 A 漂移到 B（GARP，客户端不做 ARP flush）：`VIP_PRIMARY_NODE=NODE_A` → `VIP_FAILOVER_NODE=NODE_B`，`SESSION_DISCONTINUITY=1` → `VIP_FAILOVER_DRILL_PASSED`。负例：VIP 无人持有 / VIP 撤下后必须不通、多分片配置被 `gen-proxy` 拒绝、坏配置被 `haproxy -c` 拒绝；另做变体负例（两节点同标识 → 脚本 rc=1）证明身份断言非空转。两个不同网段各通过一次、退出无残留。**边界**：VIP 由脚本模拟（keepalived / 云浮动 IP 替身），产品不提供也不感知；入口恢复但会话与数据不连续，R-04 / R-05 均未修复 |
 
-**仍未做的验收**：HAProxy + VIP 联调（需真实浮动 IP / 双机网络）；R-05 的 `disable_ssl` 硬编码 / token 不落盘 / 内建 TLS 属**需设计决策**（r8 的抓包门禁只证明弱点、不修风险）；真 HA 属新产品立项。r10 如实保留的残余风险：CI 首次 cache miss 仍需访问上游一次（runner 侧、带重试），缓存命中后测试进程零网络。**r10 已解除**：`quack-e2e` 在 PR 上的 advisory。**r9 已解除**：Windows 产物去留（已撤下发布产物并落成必需门禁）、真实引擎 E2E 完整复跑（r10 进一步收紧为严格离线）。**r8 已解除**：LAN 明文抓包实证。**r7 已解除**：非 root systemd 安装演练、R-23 生产加固、govulncheck 基线清零转必需。
+**仍未做的验收**：R-05 的 `disable_ssl` 硬编码 / token 不落盘 / 内建 TLS 属**需设计决策**（r8 的抓包门禁只证明弱点、不修风险；r11 的 VIP 联调同样不修）；真 HA 属新产品立项。**r11 已解除**：HAProxy + VIP 联调（Docker bridge 双容器即可实证，不必等物理浮动 IP；但口径是「生成配置在浮动 IP 入口下可用」，**不是**产品具备 HA，脚本实证 `SESSION_DISCONTINUITY=1`）。r10 如实保留的残余风险：CI 首次 cache miss 仍需访问上游一次（runner 侧、带重试），缓存命中后测试进程零网络。**r10 已解除**：`quack-e2e` 在 PR 上的 advisory。**r9 已解除**：Windows 产物去留（已撤下发布产物并落成必需门禁）、真实引擎 E2E 完整复跑（r10 进一步收紧为严格离线）。**r8 已解除**：LAN 明文抓包实证。**r7 已解除**：非 root systemd 安装演练、R-23 生产加固、govulncheck 基线清零转必需。
 
 **r8 的教训与 r6/r7 不同，但同源**：r5~r7 把「LAN 明文抓包」写成未做，并没有说「环境不允许」——只是没做。本轮证明两台容器 + 一个 `AF_PACKET` 原始套接字就能实证，不需要第二台物理机。前两轮是「通道/参数受限误记为能力受限」，这一轮是「**未做被清单化后默认成了做不到**」。清单里的「未做」必须逐条问一句「现在真的做不到吗」。
 
 **r9 是同一问句的另一半答案**：「Windows 产物去留」被连续四轮标为「属产品决策，待定」，但 PRD §8 从 v0.1 起就写了 Windows 是 non-goal —— 决策早就有了，缺的是执行。本机就是 Windows，一次 `version` + `start` 实测就暴露了比「不支持」更糟的状态：产物看起来能用、失败原因还是错的（POSIX mode 位误判）。**「待决策」有时是「已有决策没落地」的委婉说法**；同理，「外部依赖不稳定」也要拆开看：本轮主机通道 48 秒下完 pinned CLI、5 秒下完签名扩展，E2E 完整通过，容器内卡住只是下载慢。
 
 **r10 是第三种形态，而且指向自己的上一轮**：r5/r6 把「通道受限」误记为「能力受限」，r8 把「未做」误当成「做不到」，r9 则把「产物离线」写成了「运行离线」——结果没造假，但**结论的口径比证据更宽**。只有把容器网络真正掐断（`--network none`），才会看到 DuckDB 偷偷 autoload 了 `httpfs`。修法不是撤掉 r9 的结论，而是补齐缺失的 pin、把条件收紧到可复现，并把新发现的运维约束（离线部署需预装 `quack` + `httpfs`）写进基线表。另一个副产品：本机 CDN 对 `httpfs` 对象反复在 ~8 MB 处断流，最终用精确 `Range` 取尾段 412631 字节拼接、gzip 与解压双 hash 校验通过 —— **下载断流仍不等于拿不到**。
+
+**r11 是第一种形态的回归，但也要防结论反向膨胀**：「HAProxy + VIP 联调」被写成「需真实浮动 IP / 双机网络」多轮，实际 Docker bridge + `NET_ADMIN` + `--user root` 即可（haproxy 镜像默认 uid 99 会让 capability 失效，属参数问题）。清单里的「环境要求」同样要逐条问「现在真的做不到吗」。**同时**：联调通过只说明生成配置经得起入口漂移，不说明产品有 HA —— VIP 是脚本搬的，切换后 `SESSION_DISCONTINUITY=1`（后端身份变化、会话与数据不连续），R-04 仍成立。把「验证范围」写窄，和把「未做」判成「做不到」一样重要。
 
 **r6 已解除 r5 的「环境阻断」结论**：真实 `haproxy -c -f`（HAProxy 3.4.7 LTS）与 `systemd-analyze verify`（systemd 255）均已跑通，并落地为**必需** CI job `deploy-verify`，见 `scripts/verify-deploy.sh` 与 `REMEDIATION.md` §5。r5 的三次失败只是 apt 通道被拦，不等于所有安装通道被拦。
 

@@ -19,6 +19,11 @@
 // the shard token in cleartext. The default is unchanged for the systemd
 // drill.
 //
+// DRILL_STUB_GREETING overrides the fixed response body. The VIP failover
+// drill (scripts/verify-vip-failover.sh) runs one stub per node with distinct
+// greetings so the client can prove WHICH node answered through the floating
+// IP. Default is unchanged for every existing caller.
+//
 // Build (the `ignore` tag keeps it out of `go build ./...` and coverage):
 //
 //	go build -o /tmp/drill-stub ./scripts/drill-stub.go
@@ -35,7 +40,7 @@ import (
 	"time"
 )
 
-const greeting = "systemd-drill-greeting"
+const defaultGreeting = "systemd-drill-greeting"
 
 var serveRE = regexp.MustCompile(`quack_serve\('quack:[^:']+:(\d+)'`)
 
@@ -68,6 +73,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	greeting := os.Getenv("DRILL_STUB_GREETING")
+	if greeting == "" {
+		greeting = defaultGreeting
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, greeting)

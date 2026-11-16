@@ -2,6 +2,33 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r11 (2026-11-16)
+
+把台账里最后一项被标为「需真实浮动 IP / 双机网络」的 **HAProxy + VIP 联调**做成实证与必需门禁。此前把它当成环境做不到，实际是没试：一个 Docker user-defined bridge + `NET_ADMIN` 就足以在两容器间漂移真实的 `/32` 浮动 IP，靠 gratuitous ARP 让客户端收敛。
+
+### 边界：联调 ≠ 产品 HA（必读）
+
+VIP 的移动由脚本完成（模拟 keepalived / 云浮动 IP），**quack-proxy 既不提供也不感知**；产品仍然只 `gen-proxy` 写一份 HAProxy 配置。两个节点各跑独立后端、返回不同标识，脚本据此断言切换后**对端身份发生变化**（`SESSION_DISCONTINUITY=1`）：入口恢复了，会话与数据**没有**恢复。R-04 依然成立（不同 `.db` 是分区、token 逐分片独立、同一 `.db` 不能有两个写者），R-05 的明文风险也未被这次联调改变。`gen-proxy` 对多分片配置仍必须拒绝，脚本把这一点做成负例。
+
+### Added / Changed
+
+- **新增 `scripts/verify-vip-failover.sh`**：用真实 CLI 生成 HAProxy 配置 → 真实 `haproxy -c -f` 校验（含坏配置负例）→ 两节点容器各起真实 HAProxy 2.8 + 独立 stub → 客户端经 VIP 访问 → 主节点整容器故障 → 备节点加 VIP + GARP → 再经 VIP 访问。负例：VIP 无人持有时必须不通、VIP 撤下后必须不通、多分片配置必须被 `gen-proxy` 拒绝、坏配置必须被 `haproxy -c` 拒绝。默认 CIDR 冲突时自动回退到 3 个候选网段。
+- **`scripts/drill-stub.go`**：新增可选 `DRILL_STUB_GREETING`，让每个节点返回不同标识；默认值与所有既有调用者不变。
+- **`.github/workflows/ci.yml`**：新增必需 job `vip-failover`（`ubuntu-latest`，先静态构建 CLI + stub 再跑脚本）。所有必需门禁现为 8 个。
+
+### Verification（r11 实机）
+
+- 两次不同网段（`172.29.83.0/24` / `172.29.91.0/24`）均 `VIP_FAILOVER_DRILL_PASSED`：生成配置 1004 B、`HAPROXY_CONFIG_VALID=1`、`GEN_PROXY_MULTI_SHARD_REJECTED=1`、`VIP_ABSENT_CONTROL_OK=1`、`VIP_PRIMARY_NODE=NODE_A` → `VIP_FAILOVER_NODE=NODE_B`、`SESSION_DISCONTINUITY=1`、`VIP_REMOVED_CONTROL_OK=1`，退出码 0、无容器/网络残留。
+- **额外变体负例**：把两个节点改成返回同一标识后，脚本报 `FAIL: VIP did not fail over to node B (got 'NODE_A')`、rc=1、无 PASS 标记 —— 证明身份断言不是空转。
+- 踩坑记录：`haproxy:2.8-alpine` 默认以 uid 99 运行，`--cap-add=NET_ADMIN` 对非 root 不生效（`RTNETLINK: Operation not permitted`），必须显式 `--user root`；Git Bash 的 MSYS 会把容器内 `-w /work` 改写成宿主路径，脚本已统一用 `cygpath` 规范化并禁用参数改写。
+- 回归：11 个脚本 `bash -n`、三份 YAML `yaml.v3` 实解析、`git diff --check` 干净；`gofmt` / `go vet` / `go test ./... -race -count=1` 5 包全绿、总计 **70.9%**；linux/darwin/windows 交叉构建通过。
+
+#### 仍未完成（如实）
+
+R-05 的 `disable_ssl` 硬编码 / token 不落盘 / 内建 TLS 属**需设计决策**（`plaintext-audit` 只证明弱点、不修风险）；真 HA 属新产品立项；r10 的残余风险仍在（CI 首次 cache miss 需访问上游一次）。**r11 已解除**：HAProxy + VIP 联调（但如上所述，不等于具备 HA 能力）。
+
+---
+
 ## Unreleased — remediation r10 (2026-11-16)
 
 把整改台账里最后一项「本环境能做、但一直被当作做不到」收紧：`quack-e2e` 在 **PR 上也不再是 advisory**。做法是让真实引擎 E2E 不再在测试过程中访问外部 CDN，改为 CI runner 上一次性预取、SHA256 校验、缓存复用。

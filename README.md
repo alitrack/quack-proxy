@@ -8,7 +8,7 @@
 
 > One YAML, one command. Start and supervise multiple DuckDB + Quack endpoints on a single host.
 
-> **Status (2026-11-16, remediation r10):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All CI gates are now required (no advisory left), including a strictly-offline real-engine E2E. **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
+> **Status (2026-11-16, remediation r11):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All CI gates are required (no advisory left), including a strictly-offline real-engine E2E and a real HAProxy + floating-IP drill. **The VIP drill is NOT an HA feature**: the address is moved by the drill (standing in for keepalived / a cloud floating IP); after failover the client reaches a different backend (`SESSION_DISCONTINUITY=1`), so sessions and data do not survive. **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
 
 **quack-proxy** is a lightweight Go daemon that manages multiple DuckDB+[Quack](https://duckdb.org/docs/stable/extensions/quack.html) child processes with built-in health checks, automatic restart, and HAProxy config generation. Think of it as the "systemd for DuckDB Quack endpoints" — except you configure it in one YAML file and it handles everything. It does **not** provide control-plane redundancy, automatic failover, or a unified query endpoint.
 
@@ -490,14 +490,16 @@ Verified on real systemd 255 (3/3) and enforced as a required CI job.
 **CI:** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs gofmt,
 `go vet`, `go test -race -cover` with a coverage gate (Go 1.25 / 1.26 / 1.27),
 a **required** version-pinned `govulncheck` job (go1.27.4, zero-finding
-baseline), Linux + Windows cross-builds, the Python splitter suite, and six
+baseline), Linux + Windows cross-builds, the Python splitter suite, and eight
 **required** real-system gates: `crash-drill` (daemon SIGKILL / R-22),
 `deploy-verify` (`scripts/verify-deploy.sh`: real `haproxy -c -f`, live
 forwarding, `systemd-analyze verify`, each with a negative control, plus the
 R-23 hardening check), `systemd-drill` (above), `vuln-scan`,
-`plaintext-audit` (below), and `windows-runtime-guard` (a real
+`plaintext-audit` (below), `windows-runtime-guard` (a real
 windows-latest runner proves the cross-compiled binary refuses to start
-honestly, R-18). **Releases publish linux/darwin only**; the Windows build
+honestly, R-18), `quack-e2e` (strictly-offline real engine, below), and
+`vip-failover` (real HAProxy + floating IP, below). **Releases publish
+linux/darwin only**; the Windows build
 is a source-compatibility check, not a supported artifact. The **real
 DuckDB + Quack E2E job** is **required on every event, including pull
 requests** (r10; no advisory left): `prefetch-quack-e2e.sh` fills a
@@ -528,6 +530,20 @@ traffic; it also asserts (negative control) that an unprepared host is
 rejected. Verified on HAProxy 3.4.7 and 2.8.31. Keeping the option off is a
 deliberate choice: injecting the directives onto an unprepared host makes
 HAProxy refuse to start.
+
+**HAProxy + VIP drill (r11):** `scripts/verify-vip-failover.sh` is a required
+CI job that runs the **generated** config on two real HAProxy 2.8 containers
+and moves a real `/32` floating IP between them (gratuitous ARP, no client-side
+ARP flush). It asserts `VIP_FAILOVER_DRILL_PASSED` with negative controls:
+an unowned VIP must be unreachable, a withdrawn VIP must stop answering, a
+multi-shard config must be refused by `gen-proxy` (R-04), and a broken config
+must be refused by `haproxy -c -f`. **Read this carefully:** the VIP is moved
+by the script, not by quack-proxy. Each node has its own backend, and the
+drill asserts that the answering node changes after failover
+(`SESSION_DISCONTINUITY=1`) — the entry point recovers, sessions and data do
+not. This is an integration check of the generated config, **not** an HA
+feature. Run it with `bash scripts/verify-vip-failover.sh` (needs docker; pass
+`--proxy-bin` / `--stub-bin` if Go is unavailable).
 
 **LAN cleartext audit (R-05):** `scripts/verify-plaintext.sh` is a required CI
 job that proves the transport risk instead of merely documenting it. It builds
@@ -601,6 +617,11 @@ Three verification layers close the old "testing illusion" gap (R-15):
   hardened config and asserts privilege drop plus real traffic forwarding,
   with negative controls for an unprovisioned account and (HAProxy >= 3.x)
   the unhardened root warnings (R-23). Required CI step.
+- `scripts/verify-vip-failover.sh` moves a real floating IP between two
+  HAProxy containers and proves the generated config still forwards traffic,
+  while asserting `SESSION_DISCONTINUITY=1` (the backend identity changes, so
+  this is NOT data/session HA). Required CI job; see above for the full scope
+  caveat.
 - `scripts/verify-windows.sh` runs on a real Windows runner (or locally in
   Git Bash): it asserts `version` works but `start` refuses with the explicit
   R-18 / WSL2 message. It deliberately passes a nonexistent config path so

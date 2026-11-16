@@ -1,6 +1,6 @@
 # 安全说明（SECURITY）
 
-> 适用版本：v0.2.0 + 本次整改补丁（2026-11-16，r10）
+> 适用版本：v0.2.0 + 本次整改补丁（2026-11-16，r11）
 > 配套阅读：`SCOPE.md`（边界）、`REMEDIATION.md`（缺陷台账与状态）
 
 ## 1. 信任模型
@@ -40,7 +40,7 @@
 3. **健康检查不是协议握手**：默认只判 2xx；配置 `health_expect` 后变为「响应 body 子串校验」，仍不等价于 Quack 握手或 token 验证。
 4. **daemon 是单点**：无控制面冗余、无自动接管，`systemd` 单元显式 `Restart=no`（R-01）。
 5. **停机无 `CHECKPOINT`**：DuckDB CLI 阻塞在 `quack_serve`，没有 admin 通道可注入 SQL；SIGKILL 兜底依赖 WAL 恢复（R-12）。R-21 的整组 SIGKILL 使这条路径更常被调用，备份/快照不应依赖优雅落盘。
-6. **CI 门禁已无 advisory（r10）**：`quack-e2e` 曾因每次运行都要访问 GitHub Releases 与 DuckDB 扩展 CDN（实测返回过 HTTP 502）而在 PR 上为 advisory。r10 改为：`scripts/prefetch-quack-e2e.sh` 在 runner 上一次性预取并逐项 SHA256 校验 pinned DuckDB CLI（`c6507206…`）、签名 core `quack`（`9c893bd5…`）与 `httpfs`（`77e6c429…`），由 SHA-pinned `actions/cache` 复用；测试进程在 `QUACK_E2E_OFFLINE=1` 下**严格离线**（无 `curl`、无 `INSTALL`），缓存缺失或被篡改即硬失败、绝不静默回退联网。CI 移除 `continue-on-error`，**PR 也为必需**，并用 `--network none` 容器实证 `ALL_QUACK_E2E_CHECKS_PASSED` 与 4 个负例。供应链约束不变：绝不 `-unsigned`、绝不 community 源，签名仍由 DuckDB 在 `LOAD` 时校验。**口径更正**：r9 所谓「离线复跑」其实容器仍联网、由 DuckDB autoload 下载了 `httpfs`；严格离线时磁盘库会报 `read-only crypto module loaded`，故 r10 把 `httpfs` 也 pin 进缓存。**残余风险如实**：CI 首次 cache miss 仍需访问上游一次（runner 侧、带重试），但不再有 advisory 逃生口。**govulncheck 已转必需**：r5 发现该步骤原先固定在 Go 1.25 job、因版本要求装不上而被静默吞掉；移到 1.26 后实测 `go1.26.11` 报告 11 项 Go 标准库告警。r7 用 `go1.27.4` + `govulncheck@v1.9.0` 实测 `No vulnerabilities found`（`SCAN_RC=0`），基线清零，新增必需 job `vuln-scan`；release 工作流同步固定 `go-version: '1.27.4'`，确保发布产物与扫描用的是同一套已修补 stdlib。**不要沿用旧工具链构建的产物**。必需门禁现为：`crash-drill`（R-22 回归）、`deploy-verify`（真实 HAProxy / systemd 二进制校验 + R-23 加固）、`systemd-drill`（非 root 实机安装演练）、`vuln-scan`、`plaintext-audit`（R-05 明文实证）、`windows-runtime-guard`（R-18 产物诚实性）、**`quack-e2e`（严格离线真实引擎）**。
+6. **CI 门禁已无 advisory（r10）**：`quack-e2e` 曾因每次运行都要访问 GitHub Releases 与 DuckDB 扩展 CDN（实测返回过 HTTP 502）而在 PR 上为 advisory。r10 改为：`scripts/prefetch-quack-e2e.sh` 在 runner 上一次性预取并逐项 SHA256 校验 pinned DuckDB CLI（`c6507206…`）、签名 core `quack`（`9c893bd5…`）与 `httpfs`（`77e6c429…`），由 SHA-pinned `actions/cache` 复用；测试进程在 `QUACK_E2E_OFFLINE=1` 下**严格离线**（无 `curl`、无 `INSTALL`），缓存缺失或被篡改即硬失败、绝不静默回退联网。CI 移除 `continue-on-error`，**PR 也为必需**，并用 `--network none` 容器实证 `ALL_QUACK_E2E_CHECKS_PASSED` 与 4 个负例。供应链约束不变：绝不 `-unsigned`、绝不 community 源，签名仍由 DuckDB 在 `LOAD` 时校验。**口径更正**：r9 所谓「离线复跑」其实容器仍联网、由 DuckDB autoload 下载了 `httpfs`；严格离线时磁盘库会报 `read-only crypto module loaded`，故 r10 把 `httpfs` 也 pin 进缓存。**残余风险如实**：CI 首次 cache miss 仍需访问上游一次（runner 侧、带重试），但不再有 advisory 逃生口。**govulncheck 已转必需**：r5 发现该步骤原先固定在 Go 1.25 job、因版本要求装不上而被静默吞掉；移到 1.26 后实测 `go1.26.11` 报告 11 项 Go 标准库告警。r7 用 `go1.27.4` + `govulncheck@v1.9.0` 实测 `No vulnerabilities found`（`SCAN_RC=0`），基线清零，新增必需 job `vuln-scan`；release 工作流同步固定 `go-version: '1.27.4'`，确保发布产物与扫描用的是同一套已修补 stdlib。**不要沿用旧工具链构建的产物**。必需门禁现为：`crash-drill`（R-22 回归）、`deploy-verify`（真实 HAProxy / systemd 二进制校验 + R-23 加固）、`systemd-drill`（非 root 实机安装演练）、`vuln-scan`、`plaintext-audit`（R-05 明文实证）、`windows-runtime-guard`（R-18 产物诚实性）、**`quack-e2e`（严格离线真实引擎）**、**`vip-failover`（r11：HAProxy + VIP 联调，见第 11 条）**。
 7. **Windows 产物（r9 已收口）**：release **不再发布** Windows 二进制；CI 只保留 `GOOS=windows` 交叉编译作源码兼容性检查。r9 在真实 Windows 上实证旧产物 `version` 可用但 `start` 因 `lookupBin` 的 POSIX mode 位误判报「duckdb_bin 不可执行」；现已修判定并改为启动即显式拒绝（R-18）。本条在 r9 文档中一度被漏改，r10 一并纠正。
 8. **完全离线部署需预装两个扩展（r10 新增运维约束）**：DuckDB v2.0.0 写**磁盘数据库**时必须有 `httpfs` 提供的完整 crypto 后端；只预装 `quack` 会在无网络主机上报 `read-only crypto module loaded`。请把签名 core `quack` **与** `httpfs` 都放进 `$HOME/.duckdb/extensions/v2.0.0/linux_amd64/`（或对应平台目录），文件存在即可被 autoload 命中，无需改 boot SQL；`allow_unsigned_extensions` 保持 false。
 9. **daemon 崩溃后的孤儿进程**：`SIGKILL` daemon 不会带走子进程组，孤儿仍占端口且 pid/status 残留。r5 起新 daemon 会拒绝在该端口启动（R-22），但**不会自动清理孤儿**——运维必须先停掉遗留进程组再重启。自动接管属真 HA 能力，本项目不提供；演练复现步骤见 `scripts/daemon-crash-drill.sh`。
@@ -52,13 +52,15 @@
 
    脚本会断言：未预置账号时 `haproxy -c -f` 拒绝配置；未加固配置在 HAProxy ≥ 3.x 启动时确实告警；加固配置启动后 `/proc/<pid>/status` 的 real uid 是 `haproxy`、没有 root 告警，且前端仍能真实转发流量。实测 HAProxy **3.4.7** 与 **2.8.31** 均通过（2.8 无 3.x 的告警文案，该负例按主版本自动跳过并明确打印 SKIPPED）。默认输出仍保持三条指令为注释，保证未加固主机可用。
 
+11. **VIP / 浮动 IP 不会带来数据高可用（r11 实证）**：`scripts/verify-vip-failover.sh` 在 Docker bridge 上把真实 `/32` 地址从节点 A 漂移到 B，证明 `gen-proxy` 生成的配置经得起入口切换（必需 CI job `vip-failover`）。但 **VIP 的移动由外部编排完成，quack-proxy 既不提供也不感知**；两个节点是各自独立的后端，脚本断言切换后对端身份变化（`SESSION_DISCONTINUITY=1`）——连接能重建，**会话状态与数据不连续**。多分片 VIP 后端仍被 `gen-proxy` 明确拒绝（R-04），明文传输与 token 落盘风险不因 VIP 改变（R-05）。请勿据此宣称「已具备 HA」；真 HA 需另行立项。
+
 ## 4. 需要对外暴露时的最小检查清单
 
 - [ ] 在外部代理终止 TLS，并限制来源 IP；quack-proxy 自身不提供 TLS（`proxy.ssl.enabled: true` 会被加载期拒绝）。可用 `bash scripts/verify-plaintext.sh` 亲眼看到 token 在明文链路上完整可读，以及 TLS 通道不再泄漏
 - [ ] 每个分片使用独立、足够随机的 token，不要复用
 - [ ] 确认 status.json / pid 文件的属主与 0600 权限，目录不被其他用户可写
 - [ ] 预装签名 core 扩展 `quack` **与 `httpfs`**（后者是 DuckDB v2.0.0 写磁盘库所需，离线主机尤其必须，见上文第 8 条），`allow_unsigned_extensions` 保持 false，并校验 DuckDB CLI 的 SHA256；可用 `bash scripts/prefetch-quack-e2e.sh --cache-dir <dir>` 取得三个已 SHA256 校验的 pinned 产物
-- [ ] 若经 VIP/DNS 访问，才开启 `allow_other_hostname`，并理解其含义
+- [ ] 若经 VIP/DNS 访问，才开启 `allow_other_hostname`，并理解其含义；VIP 只解决入口可达性，不保证会话/数据连续（见上文第 11 条）。可用 `bash scripts/verify-vip-failover.sh` 复现入口漂移与 `SESSION_DISCONTINUITY=1`
 - [ ] 配置 `listener.health_expect`，避免端口被其他 HTTP 服务占用时假阳性
 - [ ] systemd 安装后按 `scripts/systemd-install-drill.sh` 验证：服务以非 root 运行、`RuntimeDirectory` 属主/权限正确、停止后端口与 pid/status 全部清理（r7 已在真实 systemd 255 上 3/3 通过）
 - [ ] 生成 HAProxy 配置前设 `proxy.hardened: true` 并执行 `scripts/verify-hardening.sh`，确认 HAProxy 已降权

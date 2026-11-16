@@ -12,6 +12,9 @@
 # to start with an actionable message. Since r10 `quack-e2e` runs a real
 # DuckDB + Quack engine strictly offline from a SHA256-pinned cache and is
 # REQUIRED on pull requests too; see the job comment for the cache contract.
+# Since r11 the required `vip-failover` job drives the generated HAProxy
+# config through a real floating-IP move between two containers; it also
+# proves that failover does NOT preserve sessions/data (R-04).
 name: CI
 
 on:
@@ -236,6 +239,35 @@ jobs:
           CGO_ENABLED=0 go build -o /tmp/drill-stub ./scripts/drill-stub.go
       - name: prove cleartext token on the wire
         run: bash scripts/verify-plaintext.sh --proxy-bin /tmp/quack-proxy --stub-bin /tmp/drill-stub
+
+  vip-failover:
+    name: HAProxy + VIP failover drill (R-04 / R-23)
+    runs-on: ubuntu-latest
+    # Required gate (r11). Closes the last "needs real hardware" item on the
+    # ledger: a Docker bridge with NET_ADMIN is enough to move a real /32
+    # floating IP between two containers with gratuitous ARP.
+    #
+    # Honest scope: this does NOT mean quack-proxy provides HA. The product
+    # only WRITES an HAProxy config; the VIP move is performed by the script
+    # (standing in for keepalived / a cloud floating IP). Each node runs a
+    # separate backend with a different greeting and the client asserts that
+    # the peer identity CHANGES after failover (SESSION_DISCONTINUITY=1):
+    # the entry point recovers, the session and data do not. R-04 still holds.
+    # Negative controls: VIP unowned, VIP withdrawn, multi-shard config
+    # refused by gen-proxy, and a broken file refused by `haproxy -c -f`.
+    # The only external dependency is pulling two small images (3 retries).
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: build daemon + drill stub (static)
+        run: |
+          CGO_ENABLED=0 go build -o /tmp/quack-proxy ./cmd/quack-proxy
+          CGO_ENABLED=0 go build -o /tmp/drill-stub ./scripts/drill-stub.go
+      - name: prove the generated config survives a real VIP failover
+        run: bash scripts/verify-vip-failover.sh --proxy-bin /tmp/quack-proxy --stub-bin /tmp/drill-stub
 
   windows-runtime-guard:
     name: Windows runtime honesty (R-18)

@@ -36,6 +36,7 @@
 | Windows 发布产物 | §7 §8 §10 | **已撤下（r9）** | 真实 Windows 实证后从 `release.yml` 移除 windows/amd64 与 `.zip` 打包；CI 保留交叉编译，二进制启动即显式拒绝。必需 job `windows-runtime-guard` 守住该行为（R-18） |
 | 真实引擎 E2E 完整复跑 | — | **已通过（r9），r10 收紧口径** | r9：主机 HTTPS 取 pinned DuckDB v2.0.0 CLI（SHA256 与脚本 pin 一致）+ 官方签名 core 扩展，喂入容器后 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 207 ms / ~241 qps）。**r10 更正**：r9 的容器仍联网、由 DuckDB autoload 下载了 `httpfs`，严格来说不是「离线」。r10 首次用 `--network none` 复跑，发现磁盘库报 `read-only crypto module loaded`，据此把 `httpfs` 也 pin 进缓存，并在单个无网络容器内再次跑到 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 230 ms / ~217 qps）+ 4 个负例 |
 | 完全离线部署的扩展依赖 | — | **r10 新增运维约束** | DuckDB v2.0.0 写磁盘数据库必须能加载签名 core `httpfs` 提供完整 crypto 后端；只预装 `quack` 会在无网络主机上启动失败。离线部署需同时预装 `quack` + `httpfs`，`allow_unsigned_extensions` 保持 false。文件存在即可被 autoload 命中，boot SQL 无需改动 |
+| HAProxy + VIP 联调（生成配置的入口兼容性） | §4.1 §6 | **已实证（r11），但非 HA 能力** | `scripts/verify-vip-failover.sh` 在 Docker bridge 上让真实 `/32` 浮动 IP 于两节点间漂移（GARP），真实 HAProxy 2.8 用 `gen-proxy` 生成的配置转发：`VIP_PRIMARY_NODE=NODE_A` → `VIP_FAILOVER_NODE=NODE_B`、`SESSION_DISCONTINUITY=1`、`VIP_FAILOVER_DRILL_PASSED`；多分片配置仍被拒绝（R-04）。必需 CI job `vip-failover`。**VIP 由脚本模拟外部编排，产品不提供也不感知；切换后会话与数据不连续**，上表「常驻 Coordinator / 统一查询入口 VIP」仍为未实现 |
 
 > 状态取值：已实现 / 部分实现 / 未实现 / 已放弃。编号 `R-xx` 对应 `REMEDIATION.md`。
 
