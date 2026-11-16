@@ -88,6 +88,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         working-directory: dist
         run: |
           # --generate-notes summarizes the commits since the previous tag,
