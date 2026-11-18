@@ -2,6 +2,86 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r15 (2026-11-18)
+
+**结论先行**：台账里连标多轮的「R-05 产品接入 TLS 属需甲方拍板的设计决策」，
+回到需求原文后站不住脚。PRD §4.2 的 v0.1 原始稿写的是「Nginx 反向代理做
+SSL termination + 固定 token」，`SCOPE.md` §3 把「内建 TLS 终止」列为
+non-goal 并写明「由外部代理终止」，`SECURITY.md` 的运维清单也要求「在外部
+代理终止 TLS，并限制来源 IP」。**甲方从一开始就决定 quack-proxy 自己不提供
+TLS** —— 这不是等待拍板的新决策，而是「已有决策缺验收」。这是 r9 / r14 之后
+的**第七种形态**：把「产品不做 X、由运维做 Y」记成「要不要做 X 尚待产品
+决策」，结果既没去做 X，也没验收 Y。
+
+本轮**不新增产品 TLS、不新增必需门禁（仍是 9 个）**：把甲方指定的部署方案
+做进已有的 `plaintext-audit` 必需门禁，用真实 HAProxy 2.8.31 TLS 终止前端
+与只绑 `127.0.0.1` 的真实分片做端到端验收。
+
+### Added
+
+- `scripts/verify-plaintext.sh` 新增「PRD §4.2 部署验收」半边：同一隔离 bridge
+  上再起一个 **真实 daemon B**（`bind_host: 127.0.0.1`，独立 greeting），以及
+  一个与服务端共享 netns 的**真实 HAProxy TLS 终止容器**（明文后端腿走
+  loopback，TLS 前端对 LAN 可见）。客户端经 HTTPS 把带 token / Bearer / SQL
+  正文的请求打到真实分片，断言 `200` + 分片自己的 greeting（防「代理自己
+  应答」的假通过）。
+- 同一 `AF_PACKET` 嗅探器新增三条硬断言：TLS 前端端口抓到的是 TLS 握手记录
+  且**无任何可读凭据 / Bearer / SQL canary**；loopback 后端端口**零 payload**
+  （明文腿根本没上 eth0）；LAN 客户端**无法直连** loopback 绑定的分片。
+- 原有弱点审计全部保留：`0.0.0.0` 暴露的分片仍被抓到 387 B 明文（token、
+  `Authorization: Bearer`、SQL 正文），TLS 控制通道 canary 仍不可见，
+  `proxy.ssl.enabled=true` 仍被真实 CLI 拒绝，r14 的
+  `STATUS_TOKEN_AT_REST=0` 仍是硬断言。**同一个门禁同时展示「错误部署会泄漏」
+  与「按 PRD 部署不泄漏」**，两者不可混写。
+- 两个新负例：坏 HAProxy 配置必须被厂商 `haproxy -c -f` 拒绝；
+  `PLAINTEXT_INJECT_CLEARTEXT=1` 往该 LAN 端口注入一条明文凭据请求后，
+  门禁必须精确报 `cleartext canary ... visible on the LAN`、RC=1，且
+  **不打印** `PLAINTEXT_AUDIT_PASSED` —— 证明「LAN 无可读凭据」不是空转断言。
+
+### Changed
+
+- `plaintext-audit` 的 CI job 注释与脚本头部说明更新（job id、必需性、steps
+  均未变）；`internal/cicontract.RequiredGates` 仍是同样的 9 个，本轮
+  **Go 源码零改动**。
+- 清理改用 `find -depth -delete`，避免 Git Bash 的安全钩子拦下 `rm -rf`
+  后留下临时工作目录。
+- 剩余开放项重定性（详见 `docs/REMEDIATION.md` §5）：**产品内建 TLS 不再列为
+  「需甲方拍板」**，它是 PRD 已定的 non-goal，随之而来的证书生命周期、指纹
+  分发、HTTPS 健康探测等属于「若将来改变范围才需要的新决策」，不是本轮待办；
+  **真 HA 属 PRD §8 non-goal，需甲方新立项 + 含验收标准的 PRD / 架构 RFC**
+  —— 这才是真正的产品输入；r10 的首次 cache miss 是如实保留的残余风险，
+  未消除。
+
+### 边界（不得读宽）
+
+- 这是**运维部署方案的验收，不是产品 TLS 功能**。`supervisor.go` 仍硬编码
+  `disable_ssl = true`，`proxy.ssl` 仍是死配置，`gen-proxy` 仍只输出明文
+  HAProxy 前端，`engine-tls-capability` 的 `PRODUCT_DISABLES_ENGINE_TLS=1`
+  诚实性断言不变。验收通过**不等于** quack-proxy 已具备 TLS。
+- HAProxy 配置由演练脚本生成（**不是产品输出**），证书是一次性自签材料；
+  生产证书生命周期、CA、轮换、来源 IP 限制仍是运维责任，运维清单里的
+  待办项没有因此被勾掉。分片端点仍是 drill stub，不是真实 Quack 协议
+  （真实引擎由 `quack-e2e` 覆盖）。
+- 错误部署（`bind_host: 0.0.0.0` 且客户端直连）的明文风险**完全未修**，
+  R-05 的传输弱点仍开放；本轮只证明「照既定方案部署可消除该 LAN 暴露面」。
+
+### Verification
+
+- `plaintext-audit`：正例 RC=0（连续 3 次，含 cleanup 无残留），注入负例
+  RC=1 且精确命中 canary 断言；实机输出 `EXTERNAL_TLS_TERMINATION_OK=1` /
+  `LOOPBACK_BACKEND_NOT_ON_LAN=1` / `LAN_DIRECT_CONNECT_BLOCKED=1` /
+  `PLAINTEXT_TOKEN_VISIBLE=1` / `STATUS_TOKEN_AT_REST=0`。
+- 全量回归：`gofmt -l .` 空 / `go vet ./...` 通过 / `go test ./... -race -count=1`
+  **6 包全绿、85 个测试函数、总覆盖率 72.8%**（Go 源码零改动，数字与 r14 一致，
+  含 `internal/cicontract` 对改动后 `ci.yml` 的契约断言）；12 个 shell 脚本
+  `bash -n`、三份 YAML `yaml.v3` 实解析、linux / darwin(amd64+arm64) / windows
+  四组合交叉构建、`git diff --check` 全部通过。`systemd-drill` 真实 systemd 255
+  **RC=0**（含负例 `TOKEN_PERSIST_DEFAULT_REJECTED=1`）；`--network none` 三段
+  离线链路 **3/3 RC=0** `OFFLINE_CI_CHAIN_PASSED`；`engine-tls-capability`
+  **RC=0** 且 `PRODUCT_DISABLES_ENGINE_TLS=1`；`plaintext-audit` 正例
+  **RC=0 ×3**、注入负例 **RC=1**。**必需门禁仍 9 个**。详见
+  `docs/REMEDIATION.md` §5 的 r15 行。
+
 ## Unreleased — remediation r14 (2026-11-16)
 
 **结论先行**：PRD §4.2 的甲方修订要求（「token 不得明文落盘；`status --json`
@@ -43,7 +123,7 @@ token」），但台账连标多轮「需甲方拍板的设计决策」。这是
 
 - **明文传输风险一点都没修**：`disable_ssl = true` 仍硬编码，token /
   `Authorization: Bearer` / SQL 正文仍在 LAN 上可见；`engine-tls-capability`
-  仍是引擎能力审计。R-05 现在只剩「产品接入 TLS」开放，token 落盘项已关闭。
+  仍是引擎能力审计。R-05 现在只剩「产品接入 TLS」开放，token 落盘项已关闭。〔**r15 更正本句**：「产品接入 TLS」从来不是待甲方拍板的设计决策，PRD §4.2 / §8 早已指定「由外部代理终止」，本轮已按该既定方案完成端到端验收；见本文件最上方 r15 段。〕
 - 显式 `persist_tokens: true` 仍是甲方可接受、有 0600 保护的选择，本轮没有
   删除该能力。真 HA 立项与 r10 首次 cache miss 依赖不变。
 
@@ -148,7 +228,7 @@ pin / cache key / `needs` / 离线开关，没有任何门禁会当场拒绝，�
 
 #### 仍未完成（如实）
 
-- **R-05 产品接线与 token 不落盘**：属需甲方拍板的设计决策（清单见上）。`plaintext-audit` 与 `engine-tls-capability` 都只证明事实、不修风险。**〔本段为该轮时点的历史记录：其中「token 不落盘」已由 r14 按 PRD §4.2 既有判据完成，剩下只有「产品接入 TLS」；详见本文件最上方 r14 段。〕**
+- **R-05 产品接线与 token 不落盘**：属需甲方拍板的设计决策（清单见上）。`plaintext-audit` 与 `engine-tls-capability` 都只证明事实、不修风险。**〔本段为该轮时点的历史记录：其中「token 不落盘」已由 r14 按 PRD §4.2 既有判据完成；「产品接入 TLS」则由 r15 更正为 PRD 已定的 non-goal 并验收了既定的外部代理方案；详见本文件最上方 r15 段。〕**
 - **真 HA**：属新产品立项（control plane 冗余 / 跨机发现 / Coordinator 常驻），需重做含验收标准的 PRD + 架构 RFC。
 - **r10 残余风险**：CI 首次 cache miss 仍需 runner 访问上游一次（带重试、无 advisory 逃生口）；缓存命中后测试进程零网络。
 - **r12 新解除**：「内建 TLS 是否属于能力受限」这一前提已澄清（引擎支持，产品主动关闭）。

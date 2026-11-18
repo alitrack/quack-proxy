@@ -7,9 +7,14 @@
 # TLS, and that quack-proxy deliberately turns it off with a hardcoded
 # `disable_ssl = true` in its boot SQL. The ledger used to lump "built-in TLS"
 # into "needs a design decision", which reads like a capability limit. It is
-# not: the remaining work is a PRODUCT design decision (certificate and
-# fingerprint distribution, health checks over HTTPS, status.json contract,
-# HAProxy config), not implementing TLS in the engine.
+# not an engine limitation. r15 then corrected the second half: PRD §4.2
+# (v0.1 original) and SCOPE §3 had ALREADY decided the product does not
+# provide built-in TLS -- terminate in an external reverse proxy instead, and
+# scripts/verify-plaintext.sh now accepts that existing deployment decision
+# end to end. So this gate is an ENGINE audit ONLY; certificate lifecycle,
+# fingerprint distribution, HTTPS health checks, the status.json/attach_sql
+# contract and the HAProxy frontend belong to a FUTURE scope change, not to
+# this remediation.
 #
 # What is proven here (all with the real engine, no stubs):
 #   1. quack_serve exposes disable_ssl / ssl_cert_file / ssl_key_file.
@@ -33,8 +38,10 @@
 # not change any product behaviour. It does not resolve the cleartext-on-LAN
 # risk (still open under R-05). The SEPARATE token-at-rest risk was fixed in
 # r14 by global.persist_tokens=false (see verify-plaintext.sh); this script
-# says nothing about it either way. Turning engine TLS into a shipped feature
-# still requires an operator-facing design decision.
+# says nothing about it either way. Turning engine TLS into a shipped product
+# feature would require CHANGING THE SCOPE (PRD §4.2 / SCOPE §3 exclude
+# built-in TLS); the existing decision -- terminate in an external reverse
+# proxy -- was accepted end to end by r15 in scripts/verify-plaintext.sh.
 #
 # Supply chain: cache mode is STRICTLY OFFLINE, with no curl, no INSTALL and
 # no CDN fallback. Every artifact is checked against the same SHA256 pins as
@@ -349,9 +356,12 @@ fi
 echo
 echo "ENGINE_TLS_CAPABILITY_PASSED"
 echo "  Evidence about the PINNED ENGINE ONLY. quack-proxy still serves plaintext"
-echo "  HTTP (disable_ssl=true hardcoded); R-05 remains OPEN. Enabling TLS in the"
-echo "  product requires a design decision on certificates, fingerprint delivery,"
-echo "  HTTPS health checks, the status.json attach_sql contract and the HAProxy"
-echo "  frontend - not an engine implementation. Token-at-rest was fixed in r14"
-echo "  (global.persist_tokens defaults to false); cleartext transport is NOT."
-echo "  See docs/REMEDIATION.md R-05 and docs/SECURITY.md."
+echo "  HTTP (disable_ssl=true hardcoded); the cleartext risk of a shard wrongly"
+echo "  exposed directly on a LAN remains OPEN (R-05). PRD §4.2 / SCOPE §3"
+echo "  already decided the product does NOT provide built-in TLS: terminate in"
+echo "  an external reverse proxy; r15 accepted that deployment end to end in"
+echo "  verify-plaintext.sh. Enabling TLS IN THE PRODUCT would be a SCOPE CHANGE"
+echo "  (certificates, fingerprint delivery, HTTPS health checks, attach_sql"
+echo "  contract, HAProxy frontend) and would make this gate correctly fail."
+echo "  Token-at-rest was fixed in r14 (global.persist_tokens defaults to false);"
+echo "  cleartext transport is NOT. See docs/REMEDIATION.md R-05 and SECURITY.md."

@@ -20,6 +20,10 @@
 # fingerprint pinning) while quack-proxy's boot SQL hardcodes
 # disable_ssl=true. This is an engine audit, NOT a product fix: R-05 stays
 # open. It reuses quack-e2e's cache via `needs`, so it adds ZERO downloads.
+# Since r15 the required `plaintext-audit` gate also ACCEPTS the PRD's
+# existing deployment decision (PRD §4.2 / SCOPE §3: no built-in TLS,
+# terminate in an external proxy) end to end with a real HAProxy terminator.
+# Still NINE gates (no new job); the product still serves plaintext HTTP.
 name: CI
 
 on:
@@ -140,13 +144,16 @@ jobs:
     #
     # SCOPE, do not overstate: this is an ENGINE capability audit. It does NOT
     # mean quack-proxy terminates TLS, does NOT change product behaviour, and
-    # does NOT fix the LAN cleartext or token-at-rest risks (R-05 remains
-    # OPEN). Shipping TLS is a product design decision: certificate lifecycle
-    # and fingerprint delivery to clients, health checks over HTTPS, the
-    # status.json contract and the generated HAProxy config. If TLS is ever
-    # enabled in the product, this gate is EXPECTED to fail (it asserts the
-    # hardcoded disable_ssl=true); update the gate and docs together, same
-    # contract as plaintext-audit.
+    # does NOT fix the LAN cleartext risk of a wrongly exposed shard (R-05
+    # still open there); token-at-rest was separately fixed in r14. PRD §4.2
+    # / SCOPE §3 already decided the product does NOT ship built-in TLS --
+    # terminate in an external reverse proxy; r15 accepted that deployment
+    # end to end in plaintext-audit. Enabling TLS IN THE PRODUCT would be a
+    # SCOPE CHANGE (certificate lifecycle, fingerprint delivery, HTTPS health
+    # checks, attach_sql contract, generated HAProxy config). If that ever
+    # happens this gate is EXPECTED to fail (it asserts the hardcoded
+    # disable_ssl=true); update the gate and docs together, same contract
+    # as plaintext-audit.
     #
     # Zero new downloads: `needs: quack-e2e` guarantees the SHA256-pinned
     # cache has already been filled and saved, and the identical cache key
@@ -267,14 +274,20 @@ jobs:
   plaintext-audit:
     name: LAN cleartext audit (R-05)
     runs-on: ubuntu-latest
-    # Required gate. This is an AUDIT, not a fix: it proves with a real
-    # AF_PACKET capture that a shard exposed on a LAN interface carries its
-    # token in cleartext, and that a TLS control channel on the same segment
-    # does not. It also uses the real CLI to confirm proxy.ssl.enabled=true is
-    # rejected. If TLS termination is ever added, this job is EXPECTED to
-    # fail: update the assertions and docs together, do not delete the gate.
-    # The only external dependency is pulling a small Python 3 image (the
-    # script retries 3 times); everything else is built locally.
+    # Required gate. Half AUDIT, half ACCEPTANCE of the PRD's EXISTING
+    # deployment decision (PRD §4.2 / SCOPE §3: no built-in TLS, terminate
+    # in an external proxy). It proves with a real AF_PACKET capture that a
+    # shard exposed on a LAN interface carries its token in cleartext, that
+    # a TLS control channel on the same segment does not, and (r15) that a
+    # loopback-bound shard behind a real HAProxy TLS terminator answers the
+    # client over HTTPS with NO readable credential on the LAN and ZERO
+    # payload on the backend port. It also uses the real CLI to confirm
+    # proxy.ssl.enabled=true is rejected. NOT a product TLS feature:
+    # disable_ssl=true, the dead proxy.ssl config and plain gen-proxy output
+    # are unchanged. If TLS is ever added to the PRODUCT, the audit half is
+    # EXPECTED to fail: update assertions and docs, do not delete the gate.
+    # External deps: python:3.11-slim + haproxy:2.8-alpine (both already
+    # used by other gates), pulls retried 3 times; all else built locally.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

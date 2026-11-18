@@ -8,7 +8,7 @@
 
 > One YAML, one command. Start and supervise multiple DuckDB + Quack endpoints on a single host.
 
-> **Status (2026-11-16, remediation r14):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All nine CI gates are required (no advisory left), including a strictly-offline real-engine E2E, a real HAProxy + floating-IP drill, and an engine TLS capability audit. **The VIP drill is NOT an HA feature**: the address is moved by the drill (standing in for keepalived / a cloud floating IP); after failover the client reaches a different backend (`SESSION_DISCONTINUITY=1`), so sessions and data do not survive. **The TLS audit proves the pinned DuckDB engine CAN serve HTTPS; quack-proxy still serves plaintext HTTP** and R-05 remains open for TLS wiring. **Token-at-rest was fixed in r14**: `status.json` no longer carries any token by default (`global.persist_tokens: false`); only an explicit opt-in restores 0600-persisted auto-generated tokens, and with the default off every shard must supply its own token. **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
+> **Status (2026-11-18, remediation r15):** this is a **single-host process supervisor**, not a highly-available cluster. The daemon is a single point of failure, there is no cross-machine discovery, and `gen-proxy` only writes an HAProxy config file — quack-proxy is **not** in the data path. All nine CI gates are required (no advisory left), including a strictly-offline real-engine E2E, a real HAProxy + floating-IP drill, and an engine TLS capability audit. **The VIP drill is NOT an HA feature**: the address is moved by the drill (standing in for keepalived / a cloud floating IP); after failover the client reaches a different backend (`SESSION_DISCONTINUITY=1`), so sessions and data do not survive. **The TLS audit proves the pinned DuckDB engine CAN serve HTTPS; quack-proxy still serves plaintext HTTP.** The PRD never asked the product to terminate TLS: §4.2 specifies an external reverse proxy, and SCOPE §3 lists built-in TLS termination as a non-goal. **r15 verifies that existing deployment decision end to end** (`plaintext-audit` now also drives a real HAProxy TLS terminator in front of a loopback-bound shard and proves no credential is readable on the LAN) — this is operator deployment acceptance, **not** a product TLS feature; `disable_ssl=true`, the dead `proxy.ssl` config and the plain `gen-proxy` output are unchanged, and operators must still deploy and maintain that proxy. **Exposing a shard directly on a LAN remains a cleartext risk** (R-05 transport weakness is open). **Token-at-rest was fixed in r14**: `status.json` no longer carries any token by default (`global.persist_tokens: false`); only an explicit opt-in restores 0600-persisted auto-generated tokens, and with the default off every shard must supply its own token. **Offline deployments must pre-install both the signed `quack` and `httpfs` extensions** (DuckDB v2.0.0 needs httpfs to write a disk database). Read [SCOPE](docs/SCOPE.md), [REMEDIATION](docs/REMEDIATION.md) and [SECURITY](docs/SECURITY.md) before using it for anything important.
 
 **quack-proxy** is a lightweight Go daemon that manages multiple DuckDB+[Quack](https://duckdb.org/docs/stable/extensions/quack.html) child processes with built-in health checks, automatic restart, and HAProxy config generation. Think of it as the "systemd for DuckDB Quack endpoints" — except you configure it in one YAML file and it handles everything. It does **not** provide control-plane redundancy, automatic failover, or a unified query endpoint.
 
@@ -597,7 +597,7 @@ r14 the same required job also **hard-asserts the separate token-at-rest fix**:
 `status.json` must contain neither the token value nor a `token` field by
 default (`STATUS_TOKEN_AT_REST=0`), so a regression that silently starts
 persisting credentials fails CI immediately. The explicit opt-in path is
-covered by the Go suite (`internal/supervisor/r14_token_at_rest_test.go`).
+covered by the Go suite (`internal/supervisor/r14_token_at_rest_test.go`). Since **r15** the same required job also **accepts the PRD's existing external-TLS-termination deployment**: a second real daemon whose shard binds only `127.0.0.1`, a real HAProxy 2.8 TLS terminator sharing its netns, and `AF_PACKET` assertions that no credential is readable on the LAN, that the plain backend leg never reaches the wire, and that a LAN client cannot connect to the shard directly. `PLAINTEXT_INJECT_CLEARTEXT=1` is the negative control: the job must fail if a cleartext credential ever crosses that port. Still one required job — the gate count stays at nine.
 
 **Engine TLS capability (r12, R-05):** `scripts/verify-engine-tls.sh` is a
 required CI job that reuses `quack-e2e`'s pinned, SHA256-verified offline
@@ -612,11 +612,22 @@ The job also asserts that the product boot SQL still hardcodes
 `disable_ssl = true`. **Read this as an engine audit, not a product feature:**
 quack-proxy still serves plaintext HTTP. **r14 separately fixed token-at-rest**
 (`status.json` no longer carries tokens by default); that is a different risk
-from cleartext transport, which remains open. The earlier wording "built-in TLS needs a design decision"
-sounded like an engine limitation; r12 corrects that — the remaining work is
-product wiring (certificate lifecycle, fingerprint distribution, HTTPS health
-probe, `status.json` contract, `gen-proxy` frontend), which is an owner
-decision. See [SECURITY.md](docs/SECURITY.md) and
+from cleartext transport, which remains open **only when a shard is wrongly
+exposed directly on a LAN**. The earlier wording "built-in TLS needs a design
+decision" sounded like an engine limitation; r12 corrected the capability half.
+**r15 corrected the rest**: PRD §4.2 (v0.1 original: "Nginx 反向代理做 SSL
+termination + 固定 token"), SCOPE §3 (built-in TLS termination is a non-goal)
+and the SECURITY operator checklist had **already decided the product does not
+provide TLS**; the required `plaintext-audit` job now accepts that existing
+decision end to end with a real HAProxy TLS terminator in front of a
+loopback-bound shard (no readable credential on the LAN, zero payload on the
+backend port, LAN cannot reach the shard directly, plus a cleartext-injection
+negative control). **This is operator deployment acceptance, not a product TLS
+feature** — `disable_ssl=true`, the dead `proxy.ssl` config and the plain
+`gen-proxy` output are unchanged, and operators must still deploy and maintain
+the proxy and certificates. Only if the scope is changed to enable built-in
+TLS would a new product decision be needed. See
+[SECURITY.md](docs/SECURITY.md) and
 [docs/REMEDIATION.md](docs/REMEDIATION.md) §2 R-05.
 
 ### Testing

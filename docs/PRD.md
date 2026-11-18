@@ -2,7 +2,7 @@
 
 > Product Requirements Document | 原始稿 v0.1 | 2026-05-29
 > Author: alitrack
-> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-16（**r14：执行 §4.2 既有修订要求 —— token 默认不落盘 + 显式开关**，见下表「Token 安全模型」；r13：CI 门禁契约机器可验证，见「CI 门禁契约」；r12 引擎原生 TLS 能力实证见「内建 TLS 能力边界」与 §4.1）
+> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-18（**r15：按 §4.2 与 §8 既有决策验收「外部代理终止 TLS」部署方案，并把「产品接入 TLS 属需甲方拍板」的口径纠正**，见下表「外部 TLS 终止部署验收」与 §4.3；r14：执行 §4.2 既有修订要求 —— token 默认不落盘 + 显式开关；r13：CI 门禁契约机器可验证；r12 引擎原生 TLS 能力实证见「内建 TLS 能力边界」与 §4.1）
 >
 > **本文不再作为愿景稿使用。** 原始 v0.1 内容保留作背景，但所有功能声明必须对照下表与 `docs/SCOPE.md`。凡标记「未实现 / 已放弃」的条目，README 不得再作为既有能力宣传。边界与成功判据以 `SCOPE.md` 为准，缺陷与整改进度以 `REMEDIATION.md` 为准。
 
@@ -31,11 +31,12 @@
 | 生成的 HAProxy 配置以 root 运行 | — | **已补齐可验证加固路径（默认 opt-in）** | r6 发现真实 HAProxy 3.4.7 启动告警；r7 新增 `proxy.hardened: true` 输出生效的 `chroot` / `user` / `group`，`scripts/verify-hardening.sh` 预置账号目录并用真实 HAProxy 验证降权 + 转发（3.4.7 3/3、2.8.31 1/1）。默认仍为 false：负例证明注入未预置主机会让 HAProxy 拒绝启动（R-23） |
 | 非 root systemd 安装演练 | §3.3 §6 | **已实机通过（r7）** | `scripts/systemd-install-drill.sh` 在真实 systemd 255 PID 1 安装 shipped unit 并启停，验证账户、`RuntimeDirectory`、0600 文件、healthy、脱敏与全量清理，带「无 RuntimeDirectory 必失败」负例；3/3 通过，CI 必需 job `systemd-drill`。r6 的「环境无 systemd」结论作废 |
 | 漏洞扫描与发布工具链 | — | **已收口（r7）** | `go1.26.11` 的 11 项 stdlib 告警在 `go1.27.4` 下清零；必需 `vuln-scan` job + release 固定 `go1.27.4`；CI 矩阵 1.25 / 1.26 / 1.27（R-14） |
-| LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复**；r14 只修了下方独立的「凭据落盘」项，传输风险完全未动 |
-| Token 安全模型（§4.2 修订要求） | §4.2 | **已实现（r14）** | 甲方 2026-11-13 修订要求早已给出三条判据：token 不得明文落盘、`status --json` 默认不输出、确需持久化时 0600 + 显式开关。后两条此前已做，**第一条连标多轮「需甲方拍板」实为「决策早有、缺执行」**。r14 新增 `global.persist_tokens`（默认 `false`）：`status.json` 默认不写 `token` 字段（`omitempty` + 条件赋值），0600 原子写保留；默认模式下省略分片 token 由 `config.Load` 硬拒绝并给出两种修复（显式自带 token / 开启开关），避免生成无法分发的凭据；`--show-tokens` 在 stderr 解释空结果。`plaintext-audit` 改为硬断言 `STATUS_TOKEN_AT_REST=0`，`systemd-drill` 显式开开关以保留脱敏验证并新增拒绝负例。**仍需甲方拍板的是产品接入 TLS，不是本项** |
-| 内建 TLS 能力边界 | §4.1 | **已实证引擎能力（产品仍未启用）** | r12：`scripts/verify-engine-tls.sh` 用 pinned v2.0.0 引擎在 `--network none` 容器内证明 `disable_ssl=false` → `https://`、TLSv1.3 握手、`quack_generate_keys()` 自签证书与客户端 `ssl_fingerprint` 校验全链路可用。`supervisor.go` 硬编码 `disable_ssl=true` 是**产品主动关闭**，不是引擎不支持。更正旧口径「内建 TLS 属需设计决策（隐含能力受限）」：剩余是**产品接线设计决策**（证书/指纹分发、健康探测、status.json 契约、HAProxy），需甲方拍板。必需 CI job `engine-tls-capability` 含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言。**不得据此认为 quack-proxy 已具备 TLS**（R-05） |
+| LAN 明文传输风险 | §4.1 | **已实证（风险未修）** | r8：`scripts/verify-plaintext.sh` 用真实 daemon + 独立 `AF_PACKET` 嗅探容器，在 `bind_host: 0.0.0.0` 下捕获到 token / `Authorization: Bearer` / SQL 正文；TLS 控制通道负例不泄漏；真实 CLI 拒绝 `proxy.ssl.enabled=true`。3/3 + 跨镜像 1/1 通过，必需 CI job `plaintext-audit`。**审计≠修复**；r14 只修了下方独立的「凭据落盘」项。**r15 补上对照半边**：同一门禁再验证 §4.2 既定的「loopback 分片 + 外部代理 TLS 终止」部署，证明该方案下 LAN 无可读凭据；但**错误部署（分片直连 `0.0.0.0`）的传输风险仍未修** |
+| Token 安全模型（§4.2 修订要求） | §4.2 | **已实现（r14）** | 甲方 2026-11-13 修订要求早已给出三条判据：token 不得明文落盘、`status --json` 默认不输出、确需持久化时 0600 + 显式开关。后两条此前已做，**第一条连标多轮「需甲方拍板」实为「决策早有、缺执行」**。r14 新增 `global.persist_tokens`（默认 `false`）：`status.json` 默认不写 `token` 字段（`omitempty` + 条件赋值），0600 原子写保留；默认模式下省略分片 token 由 `config.Load` 硬拒绝并给出两种修复（显式自带 token / 开启开关），避免生成无法分发的凭据；`--show-tokens` 在 stderr 解释空结果。`plaintext-audit` 改为硬断言 `STATUS_TOKEN_AT_REST=0`，`systemd-drill` 显式开开关以保留脱敏验证并新增拒绝负例。**r15 更正**：本行末句「仍需甲方拍板的是产品接入 TLS」作废 —— §4.2 原始稿与 §8 早已决定产品不内建 TLS、由外部代理终止，本轮已验收该方案，无需再拍板 |
+| 内建 TLS 能力边界 | §4.1 | **已实证引擎能力（产品仍未启用）** | r12：`scripts/verify-engine-tls.sh` 用 pinned v2.0.0 引擎在 `--network none` 容器内证明 `disable_ssl=false` → `https://`、TLSv1.3 握手、`quack_generate_keys()` 自签证书与客户端 `ssl_fingerprint` 校验全链路可用。`supervisor.go` 硬编码 `disable_ssl=true` 是**产品主动关闭**，不是引擎不支持。更正旧口径「内建 TLS 属需设计决策（隐含能力受限）」。**r15 再更正**：当年写的「剩余是产品接线设计决策、需甲方拍板」也站不住 —— §4.2 原始稿与 §8 non-goal 早已决定「产品不内建 TLS，由外部代理终止」，这是既定范围而非待决事项；本轮已把该部署方案验收（见下表与 §4.3）。证书/指纹分发、HTTPS 健康探测、`attach_sql` 契约等属于「若将来改变范围启用内建 TLS」才需要的新决策。必需 CI job `engine-tls-capability` 含 `PRODUCT_DISABLES_ENGINE_TLS=1` 诚实性断言。**不得据此认为 quack-proxy 已具备 TLS**（R-05） |
 | 真实引擎 E2E 在 CI 的门禁范围 | — | **全部必需（r10）** | r8 曾把 `continue-on-error` 收紧为仅 PR advisory；r10 移除该逃生口。新增 `scripts/prefetch-quack-e2e.sh` + SHA-pinned `actions/cache`，把 pinned CLI / `quack` / `httpfs` 做成离线缓存；测试进程 `QUACK_E2E_OFFLINE=1` 严格离线，缓存缺失即硬失败。**PR 也为必需**。如实保留：首次 cache miss 仍需 runner 访问上游一次 |
 | CI 门禁契约 | — | **已机器可验证（r13）** | `internal/cicontract` 随已必需的 `go test ./...` 解析真实 `ci.yml` / `release.yml`，断言 9 个门禁齐全、无 `continue-on-error` / 无 job 级 `if`、全部 `uses:` 为 40 位 hex SHA、两个共享缓存步骤 `path`/`key` 一致且 key 含三个 pin 前缀、`engine-tls-capability` 的 `needs` 含 `quack-e2e`、离线开关齐全；9 个单点篡改负例保证断言非空转。三段链路在单个 `--network none` 容器按 CI 顺序 3/3 RC=0。**不是第 10 个门禁**、不改产品行为、**不消除** r10 的首次 cache miss 依赖 |
+| 外部 TLS 终止部署验收 | §4.2 §8 | **已验收（r15）** | 甲方从 v0.1 起就指定「Nginx 反向代理做 SSL termination + 固定 token」、§8 把内建 TLS 终止列为 non-goal，并非「待甲方拍板」。r15 不新增产品功能、不新增门禁，在已有 `plaintext-audit` 里起第二个真实 daemon（分片只绑 `127.0.0.1`、独立 greeting）+ 真实 HAProxy 2.8.31 TLS 终止前端（共享 netns，明文腿走 loopback），客户端经 HTTPS 拿到分片自己的 200 应答；`AF_PACKET` 断言 TLS 端口只有握手记录、无可读凭据，后端端口零 payload，LAN 客户端无法直连分片。明文注入负例精确触发 canary 断言（RC=1、无 PASS）。**这是运维方案验收，不是产品 TLS**：`disable_ssl=true` / `proxy.ssl` 死配置 / 明文 `gen-proxy` 输出均未变；错误部署的明文风险仍在，证书生命周期与来源 IP 限制仍属运维责任。详见 §4.3 |
 | Windows 发布产物 | §7 §8 §10 | **已撤下（r9）** | 真实 Windows 实证后从 `release.yml` 移除 windows/amd64 与 `.zip` 打包；CI 保留交叉编译，二进制启动即显式拒绝。必需 job `windows-runtime-guard` 守住该行为（R-18） |
 | 真实引擎 E2E 完整复跑 | — | **已通过（r9），r10 收紧口径** | r9：主机 HTTPS 取 pinned DuckDB v2.0.0 CLI（SHA256 与脚本 pin 一致）+ 官方签名 core 扩展，喂入容器后 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 207 ms / ~241 qps）。**r10 更正**：r9 的容器仍联网、由 DuckDB autoload 下载了 `httpfs`，严格来说不是「离线」。r10 首次用 `--network none` 复跑，发现磁盘库报 `read-only crypto module loaded`，据此把 `httpfs` 也 pin 进缓存，并在单个无网络容器内再次跑到 `ALL_QUACK_E2E_CHECKS_PASSED`（50 次 SELECT 230 ms / ~217 qps）+ 4 个负例 |
 | 完全离线部署的扩展依赖 | — | **r10 新增运维约束** | DuckDB v2.0.0 写磁盘数据库必须能加载签名 core `httpfs` 提供完整 crypto 后端；只预装 `quack` 会在无网络主机上启动失败。离线部署需同时预装 `quack` + `httpfs`，`allow_unsigned_extensions` 保持 false。文件存在即可被 autoload 命中，boot SQL 无需改动 |
@@ -217,7 +218,7 @@ proxy:
 
 > **实现状态**：`proxy.ssl` 在 `internal/config/config.go` 中定义，但 `internal/proxy/haproxy.go` 与 supervisor 均未读取；同时 `supervisor.go` 硬编码 `disable_ssl=true`。该配置项当前**完全无效**，不得据此认为启用了 TLS。见 R-05。
 >
-> **r12 补充（影响甲方决策）**：这里的 `disable_ssl=true` 不是引擎能力限制。pinned DuckDB v2.0.0 的 Quack 扩展原生支持 HTTPS（`disable_ssl=false` + `ssl_cert_file`/`ssl_key_file` + 客户端 `ssl_fingerprint`），已由 `scripts/verify-engine-tls.sh` 在严格离线容器内实证（TLSv1.3 握手 + 指纹校验 + 4 个负例）。因此「是否启用 TLS」不是「能否实现」，而是产品接线与运维契约的设计决策：证书生命周期与私钥存放、向客户端分发/轮换 SHA256 指纹的通道、健康探测改 HTTPS、`status.json` 的 `attach_sql` 契约（`status.json` 的 **token 契约已由 r14 定案**：默认不落盘 + 显式开关，不再需要拍板）、`gen-proxy` 输出的 HAProxy 前端与 `proxy.ssl` 死配置。**r12 本轮不改产品行为**（r14 才改了 token 落盘行为）；R-05 现只剩「产品接入 TLS」开放。
+> **r12 补充（影响甲方决策）**：这里的 `disable_ssl=true` 不是引擎能力限制。pinned DuckDB v2.0.0 的 Quack 扩展原生支持 HTTPS（`disable_ssl=false` + `ssl_cert_file`/`ssl_key_file` + 客户端 `ssl_fingerprint`），已由 `scripts/verify-engine-tls.sh` 在严格离线容器内实证（TLSv1.3 握手 + 指纹校验 + 4 个负例）。因此「是否启用 TLS」不是「能否实现」，而是**范围选择**。**r15 更正**：当年写在这里的「产品接线与运维契约的设计决策」也不成立 —— §4.2 原始稿与 §8 早已选定「产品不内建 TLS、由外部代理终止」，本轮已把该既定方案端到端验收（见 §4.3）。下列契约项（证书生命周期与私钥存放、向客户端分发/轮换 SHA256 指纹的通道、健康探测改 HTTPS、`status.json` 的 `attach_sql` 契约、`gen-proxy` 输出的 HAProxy 前端与 `proxy.ssl` 死配置）**只在甲方改变范围、要求内建 TLS 时才需要重新设计**；`status.json` 的 **token 契约已由 r14 定案**（默认不落盘 + 显式开关），不再需要拍板。**r12 本轮不改产品行为**（r14 才改了 token 落盘行为）。**r15 更正本段「R-05 现只剩产品接入 TLS 开放 / 需甲方拍板」的口径**：§4.2 原始稿与 §8 早已决定产品不内建 TLS、由外部代理终止，本轮已按该既定方案完成部署验收（见 §4.3）；真正剩下的传输风险只有「分片被错误地直接暴露在 LAN 上」。证书/指纹分发等契约项属于「若改变范围启用内建 TLS」才需要的新决策，而非本次整改待办。
 
 ### 4.2 Token 安全模型
 
@@ -240,6 +241,22 @@ proxy:
 - `--show-tokens` 在无持久化凭据时由 `tokenPersistenceNotice` 在 **stderr** 解释原因与两种选择，不污染 JSON 输出。
 - 示例配置与 README Quick Start 已改为显式 token；照抄旧示例会（正确地）在加载期失败。
 - **边界**：本项只修「凭据落盘」，**不修明文传输**（R-05 的 `disable_ssl=true` 与 LAN 抓包结论完全不变）。
+
+### 4.3 外部 TLS 终止的部署验收（r15）
+
+**这不是新增需求，而是执行 §4.2 原始稿与 §8 non-goal 早已给出的决定**：quack-proxy 自身不提供 TLS，分片保持只监听 `127.0.0.1`，对外访问由运维在外部反向代理终止 TLS（原始稿举例 Nginx）；`SECURITY.md` 的运维清单同样要求「在外部代理终止 TLS，并限制来源 IP」。r15 之前，必需门禁只证明了「错误部署会泄漏」，从未验收「按 PRD 部署是否真的消除 LAN 暴露面」。台账把「产品接入 TLS」连标多轮「需甲方拍板」，实际是把「产品不做 X、由运维做 Y」误记成「要不要做 X 尚待决策」——X 没做，Y 也没验收。
+
+**验收方式**（`scripts/verify-plaintext.sh`，仍是必需 job `plaintext-audit`；**不新增门禁、不改产品行为、Go 源码零改动**）：
+
+| 项 | 实现与实测 |
+|------|-----------|
+| 错误部署对照 | daemon A 的 `bind_host: 0.0.0.0`，客户端直连 → 抓到 387 B 明文，含 token / `Authorization: Bearer` / SQL 正文（`PLAINTEXT_TOKEN_VISIBLE=1`），保留为已知弱点 |
+| 正确部署 | daemon B 的分片只绑 `127.0.0.1:19745`，应答独立 greeting `external-tls-backend-ok`；真实 HAProxy 2.8.31（`USE_OPENSSL`，一次性自签证书）与服务端共享 netns，`0.0.0.0:19746 ssl crt` 终止 TLS 后把明文腿转发到 loopback |
+| 端到端功能 | 另一容器经 HTTPS 得 `EXTERNAL_TLS_ENDPOINT (200, b'external-tls-backend-ok')`，证明流量真到了分片、不是代理自己应答 |
+| 线上不可读 | TLS 端口抓到 5144 B 且为 TLS 握手记录，四类 canary（token / Bearer / SQL / `HTTP/1.1 200`）均不可读；后端端口 **0 B**；LAN 客户端直连分片被拒（`LOOPBACK_DIRECT BLOCKED`） |
+| 负例 | 坏 HAProxy 配置被厂商 `haproxy -c -f` 拒绝；`PLAINTEXT_INJECT_CLEARTEXT=1` 注入一条明文凭据请求后，门禁精确报 `cleartext canary ... visible on the LAN`、RC=1 且无 `PLAINTEXT_AUDIT_PASSED`，证明断言非空转 |
+
+**边界**：HAProxy 配置由演练脚本生成，**不是 `gen-proxy` 的输出**；`supervisor.go` 仍硬编码 `disable_ssl = true`，`proxy.ssl` 仍是死配置，`gen-proxy` 仍只生成明文前端，`engine-tls-capability` 的 `PRODUCT_DISABLES_ENGINE_TLS=1` 不变。证书生命周期、CA 与轮换、来源 IP 限制仍是运维责任，运维清单中的待办**不因本验收而被勾掉**；分片端点仍是 drill stub，不覆盖真实 Quack 协议（由 `quack-e2e` 覆盖）。**结论只能写成「既定部署方案有效」，不能写成「quack-proxy 已具备 TLS」**；把分片直接绑 `0.0.0.0` 并直连的风险仍在。
 
 ---
 
@@ -336,6 +353,7 @@ OPTIONS (quack_token 'token_from_status_json');
 
 | 不做 | 理由 |
 |------|------|
+| **内建 TLS 终止** | **v0.1 起即如此（r15 明确写入本表，与 SCOPE §3 一致）**：§4.2 原始稿指定「Nginx 反向代理做 SSL termination + 固定 token」，对外暴露由运维在外部代理终止；`proxy.ssl.enabled: true` 在加载期显式报错，产品不生成 TLS 前端。r12 证明引擎原生支持 TLS 也不改变本范围；r15 已在必需 `plaintext-audit` 中验收该**既定部署方案**（真实 HAProxy 终止 + loopback 分片，LAN 无可读凭据），但这是运维职责不是产品功能。若将来改变范围启用内建 TLS，须新立项并同步改门禁断言 |
 | 分布式事务协调 | 超出范围，DuckDB 单事务只能写一个 ATTACH 数据库 |
 | 自动分区 / sharding | 用户自己决定数据分区策略 |
 | Web UI / Dashboard | v0.1 只做 CLI |
