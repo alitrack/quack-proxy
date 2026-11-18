@@ -2,6 +2,61 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r16 (2026-11-18)
+
+**结论先行：整改清单本身已经收敛，本轮没有新的可闭环项。** 按 r15 补的判定三问
+逐条复核 §5 末尾的四类剩余项：真 HA 是 PRD §8 既有 non-goal（明确不做、无配套
+Y），需甲方新立项 + 含验收标准的 PRD / 架构 RFC；外部代理 / 证书 / 来源 IP 限制
+是运维职责（r15 已验收方案有效性）；首次 cache miss 是如实保留的架构残余风险；
+DuckDB pin 同步已由 `internal/cicontract.CheckScriptPins` 机器化。**没有发现新的
+「能力受限 / 需甲方拍板 / 通道受限」误分类，也不存在「第八种形态」** —— 剩余清单
+结论一字不变，本轮不新增功能、门禁、脚本或 Go 源码改动。
+
+本轮唯一动作是**把 r15 的结论贯彻到同一份 `docs/PRD.md` 的正文**：r15 已把「产品
+接入 TLS 属需甲方拍板」判定为 PRD 既有 non-goal 并废除「待设计决策」这类措辞，但
+PRD 正文的历史快照没跟着同步 —— **R-17（指数退避重启）在同一份文档里自相矛盾**：
+头部「实现状态总览」表、`REMEDIATION.md §3`、`SCOPE.md §历史`、`README.md` 状态机
+说明四处都标「已修」，正文 §3.3 却仍写「（R-17，**待设计决策**）」、§7 加粗写
+「退避在默认配置下不触发」、§9 写「部分实现 / 默认配置下不触发」。这不是新待办、
+不是待甲方拍板，而是文档自身的时点标注缺失；但读者若从 §3.3 或 §7 读起，会以为
+还有一个未决的设计决策，**直接把工作量估算读宽**。
+
+### Changed（仅文档，产品行为零改动）
+
+- `docs/PRD.md` §3.3 生命周期代码块的 `⚠️` 批注、§7 非功能性需求表、§9 原始
+  M1/M2/M3 里程碑表各补一条**显式时点声明**：这些是 v0.1 原始稿 + 2026-11-13
+  评审时点快照，不是当前状态声明、不含待甲方拍板的设计决策；各 `R-xx` 的当前状态
+  一律以头部「实现状态总览」表与 `REMEDIATION.md §3` 为准。
+- 纠正 §3.3 的「R-17，待设计决策」→「Gate 2 已修：`performRestart` 保留原始
+  `lastStart`，30s grace 只作用于冷启动，退避现真实生效」；§7 的加粗断言与 §9
+  两行 R-17 备注同步补上「评审时点 / 已修 / 当前生效」限定。**保留**「部分实现」
+  等历史判定本身不改写（r10：历史快照是当时时点，不是跨轮恒定状态）。
+- 头部状态修订行补记 r16；`README.md` / `docs/SCOPE.md` / `docs/SECURITY.md` /
+  `docs/REMEDIATION.md` 版本头与验证台账同步到 r16。
+
+### 边界（不得读宽）
+
+- 「已修」不是靠文档互相引用：**`go test ./internal/supervisor -race -run
+  '^TestGate2RestartDoesNotRefreshStartupGrace$' -v` 实测 PASS**，且
+  `supervisor.go` 的 `performRestart` 确实保留并回写 `lastStart = originalStart`。
+- 这不是新一轮整改发现，也不是第八种口径错误形态；**必需门禁仍 9 个**，
+  `internal/cicontract` 断言不变，`disable_ssl=true` / `proxy.ssl` 死配置 /
+  明文 `gen-proxy` 输出 / token 默认不落盘全部原样。
+- **§5「仍未做的验收」清单结论不变**：真 HA 仍需甲方新立项，运维仍须自行部署
+  并维护外部代理、证书与来源 IP 限制，错误部署（分片直连 `0.0.0.0`）的明文
+  传输风险仍未修，首次 cache miss 残余风险如实保留。本轮不解除其中任何一项。
+
+### Verification
+
+- R-17 专项 `-race -count=1 -v` **PASS**；全量 `gofmt -l .` 空 / `go vet ./...`
+  通过 / `go test ./... -race -count=1` **6 包全绿、85 个测试函数、总覆盖率
+  72.8%**（Go 源码零改动，与 r15 一致）；三份 YAML 经 `yaml.v3` 实解析通过；
+  linux / darwin(amd64+arm64) / windows 四组合交叉构建通过；12 个 shell 脚本
+  `bash -n`、`git diff --check` 通过。
+- 本轮**未改动任何脚本、CI 工作流或 Go 源码**，故 `plaintext-audit` /
+  `systemd-drill` / 离线三段链路 / `engine-tls-capability` 四个实机门禁不重跑
+  （r15 已在同一份最终源码下 RC=0；如实说明，不冒充本轮复跑）。
+
 ## Unreleased — remediation r15 (2026-11-18)
 
 **结论先行**：台账里连标多轮的「R-05 产品接入 TLS 属需甲方拍板的设计决策」，
