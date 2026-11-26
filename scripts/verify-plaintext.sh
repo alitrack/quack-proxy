@@ -73,6 +73,13 @@
 # Negative control (must FAIL at the canary assertion, with no PASS marker):
 #   PLAINTEXT_INJECT_CLEARTEXT=1 bash scripts/verify-plaintext.sh ...
 #
+# Supply chain (r17): the DEFAULT images are pinned by manifest digest, not by
+# a floating tag - the same standard this repo already applies to every
+# `uses:` action. `internal/cicontract.CheckImagePins` enforces it. An explicit
+# --image / PLAINTEXT_IMAGE / PLAINTEXT_HAPROXY_IMAGE override may still use a
+# tag for local/offline runs; that is an operator choice, not what CI runs.
+# Digests must be rotated deliberately when upgrading the base images.
+#
 # Requirements: docker, openssl (host), python3 inside the image. If the two
 # binaries are not supplied, `go` is needed to build them (CGO_ENABLED=0).
 #
@@ -92,9 +99,10 @@ TLS_TOKEN="qp-tls-control-token"
 LOOP_TOKEN="qp-external-tls-token"
 LOOP_GREETING="external-tls-backend-ok"
 # Both images are already used by other required CI gates; no new dependency
-# class is introduced. Override with env vars for offline/local runs.
-IMAGE="${PLAINTEXT_IMAGE:-python:3.11-slim}"
-HAPROXY_IMAGE="${PLAINTEXT_HAPROXY_IMAGE:-haproxy:2.8-alpine}"
+# class is introduced. Digest-pinned since r17 (CheckImagePins enforces it);
+# override with env vars / --image for local or offline runs.
+IMAGE="${PLAINTEXT_IMAGE:-python@sha256:0b2cfd528ad7c43ba83de95e2788393cf545aae1ed738868e961454bd38a760a}"
+HAPROXY_IMAGE="${PLAINTEXT_HAPROXY_IMAGE:-haproxy@sha256:fce63f5dde742cd1f2b883ab39f7d4f9f88788827dd54fcfa864f63b9eec3bc8}"
 # NEGATIVE-CONTROL switch: PLAINTEXT_INJECT_CLEARTEXT=1 makes the client also
 # put one cleartext credential-bearing request on the LAN port. The gate MUST
 # then fail at the canary assertion and must NOT print PLAINTEXT_AUDIT_PASSED.

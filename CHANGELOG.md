@@ -2,6 +2,64 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — remediation r17 (2026-11-19)
+
+**结论先行：这不是从「仍未做」清单里翻出的第八/第九种形态，而是一个此前没被看见的
+契约覆盖面盲区。** 逐条复核剩余清单的结论仍是 r16 的「已收敛、无新可闭环项」：真 HA
+需甲方新立项，外部代理/证书/来源 IP 是运维职责，首次 cache miss 是如实保留的残余风险。
+本轮换了个角度查「**文档声称被机器验证的不变量，是否真的被覆盖**」，发现一处实质缺口：
+r13 的契约测试自称覆盖「门禁必需性 + **供应链 pin** + 共享缓存一致性」，但
+`CheckSHAPins` 只检查 `uses:`（Actions）。**4 个真正进入必需门禁执行路径的容器镜像默认值
+仍是浮动 tag**（`python:3.11-slim`、`haproxy:2.8-alpine` ×2、`alpine:latest` —— 后者是
+持续重发的滚动 tag），`docs/SECURITY.md` / `docs/SCOPE.md` 的供应链清单也从不提镜像。
+tag 可被重新发布，于是「9 个门禁无条件必需」的强度其实只等于一个未版本化的镜像。
+这是 r13 形态的延伸：**机器化的契约自己有覆盖盲区**，不是新的误分类形态。
+
+### Changed
+
+- `scripts/verify-plaintext.sh` 的 `IMAGE` / `HAPROXY_IMAGE` 与
+  `scripts/verify-vip-failover.sh` 的 `NODE_IMAGE` / `CLIENT_IMAGE` 默认值改为
+  `repo@sha256:<64hex>` manifest digest；`scripts/systemd-install-drill.sh` 的本地复跑
+  示例同步标注（该镜像不进 CI，CI 直接 `sudo bash` 在 runner 上跑）。保留 `--image` /
+  `--client-image` / `PLAINTEXT_IMAGE` / `VIP_IMAGE` 等显式覆盖供本地或离线复跑。
+- `internal/cicontract` 新增 `CheckImagePins`：扫描**全部** `scripts/*.sh`（新增门禁自动
+  纳入），断言每个 `IMAGE` / `*_IMAGE` 默认值是完整 sha256 digest、至少 4 个（防正则失灵
+  空转）、同一仓库在不同门禁里必须是**同一个** digest（共享 haproxy 必须一起轮换）；
+  新增 `CheckNoImageOverrides`：禁止 CI 用 `--image` 等参数绕过默认值，否则 pin 只是装饰。
+  两者都接入 `Validate`，随已必需的 `go test ./...` 运行，**零新增 job / 零新增下载**。
+- 负例：4 个脚本单点篡改（tag 替换、截断 digest、共享 digest 只改一处、默认值消失）+
+  1 个 YAML 变异（CI step 加 `--image python:3.11-slim`），每个都**恰好**命中对应检查；
+  原有 9 个 YAML 负例与 3 个 pin 漂移负例全部仍通过。`cicontract` 覆盖率 79.6% → 83.0%。
+- `.github/workflows/ci.yml` 三处注释同步（顶部供应链声明、两处 job 的外部依赖说明）。
+
+### 边界（不得读宽）
+
+- **本机实证**：digest 引用零下载命中本地镜像，架构 `linux/amd64` 与 GitHub runner 一致；
+  `plaintext-audit` RC=0（含 `EXTERNAL_TLS_TERMINATION_OK=1` / `STATUS_TOKEN_AT_REST=0`）、
+  注入负例 RC=1、`vip-failover` RC=0（`SESSION_DISCONTINUITY=1`）。
+- **本机没验证的**：本环境访问 Docker registry 返回 EOF，因此**既未确认这些 digest 是
+  跨架构 manifest list 还是单平台 manifest，也未验证 GitHub runner 首次按 digest 拉取**。
+  按 r10 的教训，不把「本机零下载命中 + 门禁实跑」读宽成「CI 已验证」。若上游 GC 了旧
+  digest 或 runner 解析异常，CI 会（正确地）失败，需轮换 digest —— 与 Actions SHA pin
+  需要轮换是同一性质，**不是「做不到」**。
+- 显式覆盖可以绕过 pin，属运维本地选择；`CheckNoImageOverrides` 只保证 CI 不覆盖。首次
+  遇到未缓存的 digest 仍需 pull 一次，与 r10 如实保留的首次 cache miss 同类，未消除。
+- **9 个必需门禁数量不变**，Go 产品源码、daemon 行为、引擎产物零改动；
+  `disable_ssl=true` / `proxy.ssl` 死配置 / 明文 `gen-proxy` 输出 / token 默认不落盘全部原样。
+  **§5「仍未做的验收」清单结论一字不变**：真 HA 仍是唯一需要甲方产品输入的一项。
+
+### Verification
+
+- `gofmt -l .` 空 / `go vet ./...` 通过 / `go test ./... -race -count=1` **6 包全绿、
+  86 个测试函数、总覆盖率 73.8%**（r16 为 85 / 72.8%，增量来自新契约测试）；三份 YAML
+  经 `yaml.v3` 实解析；linux / darwin(amd64+arm64) / windows 四组合交叉构建；
+  12 个 shell 脚本 `bash -n`；`git diff --check`。
+- 实机门禁：`plaintext-audit` RC=0 + 注入负例 RC=1；`vip-failover` RC=0。**离线三段链路
+  脚本（prefetch / quack-e2e / verify-engine-tls）本轮零改动，未重跑**（r15/r16 已在同一份
+  最终源码下 3/3 RC=0），如实说明，不冒充本轮复跑。
+
+---
+
 ## Unreleased — remediation r16 (2026-11-18)
 
 **结论先行：整改清单本身已经收敛，本轮没有新的可闭环项。** 按 r15 补的判定三问

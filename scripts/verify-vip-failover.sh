@@ -31,6 +31,11 @@
 #   bash scripts/verify-vip-failover.sh --subnet 172.29.91.0/24
 #   VIP_IMAGE=haproxy:3.0-alpine bash scripts/verify-vip-failover.sh
 #
+# Supply chain (r17): the DEFAULT images are digest-pinned, never floating
+# tags (internal/cicontract.CheckImagePins enforces it). Explicit overrides
+# such as VIP_IMAGE=... may use a tag for local runs; CI does not override.
+# Rotate digests deliberately when upgrading the base images.
+#
 # Requirements: docker (daemon reachable, NET_ADMIN allowed), go when the two
 # binaries are not supplied, bash, and the two images locally or pullable.
 # The quack-proxy CLI is executed INSIDE a container so this script works on
@@ -39,8 +44,8 @@
 # Exit: 0 = every assertion held, non-zero = first failed assertion.
 set -euo pipefail
 
-NODE_IMAGE="${VIP_IMAGE:-haproxy:2.8-alpine}"
-CLIENT_IMAGE="${VIP_CLIENT_IMAGE:-alpine:latest}"
+NODE_IMAGE="${VIP_IMAGE:-haproxy@sha256:fce63f5dde742cd1f2b883ab39f7d4f9f88788827dd54fcfa864f63b9eec3bc8}"
+CLIENT_IMAGE="${VIP_CLIENT_IMAGE:-alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a}"
 VIP_SUBNET="${VIP_SUBNET:-172.29.83.0/24}"
 SUBNET_PREFIX="${VIP_SUBNET%.*}"
 VIP_ADDR="${VIP_ADDR:-${SUBNET_PREFIX}.100}"

@@ -19,12 +19,15 @@
 # Requirements: root, a booted systemd (running|degraded), runuser, python3
 # (or curl), and either Go or prebuilt --proxy-bin / --stub-bin.
 #
-# Local (Docker, WSL2 cgroup v2):
+# Local (Docker, WSL2 cgroup v2) - LOCAL REPRO ONLY, CI runs this script
+# directly on the runner with sudo and does NOT pull this image. The example
+# is digest-pinned like the CI gate images (r17); rotate it deliberately.
 #   docker run -d --name qp-sd --privileged --cgroupns=host \
 #     --tmpfs /run --tmpfs /run/lock \
 #     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
 #     -v "$REPO:/src:ro" -v "$WORK:/work" \
-#     --entrypoint /lib/systemd/systemd jrei/systemd-ubuntu:24.04 \
+#     --entrypoint /lib/systemd/systemd \
+#     jrei/systemd-ubuntu@sha256:9018448b37c6aab4fe4a9279eef374bedefff27980a2a4faf4df05980fb8d699 \
 #     --system --unit=basic.target
 #   docker exec qp-sd bash /src/scripts/systemd-install-drill.sh \
 #     --proxy-bin /work/quack-proxy --stub-bin /work/drill-stub \

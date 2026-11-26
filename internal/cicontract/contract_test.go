@@ -42,14 +42,16 @@ func mustReplace(t *testing.T, text, old, new string, n int) string {
 // not merely "something broke").
 func checkErrors(ci, release *Workflow, pins []string) map[string][]error {
 	return map[string][]error{
-		"required-gates": CheckRequiredGates(ci),
-		"no-advisory":    CheckNoAdvisory(ci),
-		"sha-pins-ci":    CheckSHAPins(ci, "ci.yml"),
-		"sha-pins-rel":   CheckSHAPins(release, "release.yml"),
-		"cache-contract": CheckCacheContract(ci, pins),
-		"needs-linkage":  CheckNeedsLinkage(ci),
-		"offline-env":    CheckOfflineEnv(ci),
-		"script-pins":    CheckScriptPins(repoRoot()),
+		"required-gates":  CheckRequiredGates(ci),
+		"no-advisory":     CheckNoAdvisory(ci),
+		"sha-pins-ci":     CheckSHAPins(ci, "ci.yml"),
+		"sha-pins-rel":    CheckSHAPins(release, "release.yml"),
+		"cache-contract":  CheckCacheContract(ci, pins),
+		"needs-linkage":   CheckNeedsLinkage(ci),
+		"offline-env":     CheckOfflineEnv(ci),
+		"script-pins":     CheckScriptPins(repoRoot()),
+		"image-pins":      CheckImagePins(repoRoot()),
+		"image-overrides": CheckNoImageOverrides(ci),
 	}
 }
 
@@ -171,6 +173,14 @@ func TestContractRejectsMutations(t *testing.T) {
 			release:     mustParse(t, []byte(mustReplace(t, relText, "actions/checkout@"+pinSHA, "actions/checkout@v4", 1))),
 			wantFailure: "sha-pins-rel",
 		},
+		{
+			name: "CI bypasses the digest pin with a floating image tag",
+			ci: mustReplace(t, ciText,
+				"bash scripts/verify-plaintext.sh --proxy-bin /tmp/quack-proxy --stub-bin /tmp/drill-stub",
+				"bash scripts/verify-plaintext.sh --proxy-bin /tmp/quack-proxy --stub-bin /tmp/drill-stub --image python:3.11-slim", 1),
+			release:     goodRelease,
+			wantFailure: "image-overrides",
+		},
 	}
 
 	for _, tc := range cases {
@@ -272,6 +282,110 @@ func TestScriptPinDriftIsRejected(t *testing.T) {
 	}
 	// Positive control: an unmodified copy of the same scripts passes.
 	if errs := CheckScriptPins(copyScriptRepo(t)); len(errs) > 0 {
+		t.Fatalf("unmodified script set failed: %v", errs)
+	}
+}
+
+// copyImageRepo copies ALL gate scripts into a temporary repo root, because
+// CheckImagePins scans scripts/*.sh so a newly added drill is auto-covered.
+func copyImageRepo(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "scripts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := filepath.Glob(filepath.Join(repoRoot(), "scripts", "*.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range paths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "scripts", filepath.Base(p)), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// TestImagePinDriftIsRejected proves the r17 image supply-chain invariant is
+// enforced, not merely documented: a floating tag, a truncated digest, a
+// shared image rotated in only one gate, and a disappearing default must each
+// make CheckImagePins fail.
+func TestImagePinDriftIsRejected(t *testing.T) {
+	const (
+		pyDigest  = "0b2cfd528ad7c43ba83de95e2788393cf545aae1ed738868e961454bd38a760a"
+		hapDigest = "fce63f5dde742cd1f2b883ab39f7d4f9f88788827dd54fcfa864f63b9eec3bc8"
+		alpDigest = "be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+	)
+	other := strings.Repeat("a", 64)
+	cases := []struct {
+		name, file, old, replacement, wantInError string
+	}{
+		{
+			name:        "floating tag replaces a digest",
+			file:        "verify-plaintext.sh",
+			old:         "python@sha256:" + pyDigest,
+			replacement: "python:3.11-slim",
+			wantInError: "verify-plaintext.sh",
+		},
+		{
+			name:        "truncated digest replaces the full sha256",
+			file:        "verify-plaintext.sh",
+			old:         "@sha256:" + pyDigest,
+			replacement: "@sha256:deadbeef",
+			wantInError: "verify-plaintext.sh",
+		},
+		{
+			name:        "shared haproxy digest drifts in only one gate",
+			file:        "verify-vip-failover.sh",
+			old:         "haproxy@sha256:" + hapDigest,
+			replacement: "haproxy@sha256:" + other,
+			wantInError: "haproxy",
+		},
+		{
+			name:        "an image default disappears entirely",
+			file:        "verify-vip-failover.sh",
+			old:         `CLIENT_IMAGE="${VIP_CLIENT_IMAGE:-alpine@sha256:` + alpDigest + `}"`,
+			replacement: "# CLIENT_IMAGE default removed",
+			wantInError: "at least 4",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := copyImageRepo(t)
+			p := filepath.Join(root, "scripts", tc.file)
+			data, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), tc.old) {
+				t.Fatalf("mutation anchor %q not found in %s", tc.old, tc.file)
+			}
+			mutated := strings.Replace(string(data), tc.old, tc.replacement, 1)
+			if err := os.WriteFile(p, []byte(mutated), 0644); err != nil {
+				t.Fatal(err)
+			}
+			errs := CheckImagePins(root)
+			if len(errs) == 0 {
+				t.Fatal("CheckImagePins accepted the mutation; the invariant is not enforced")
+			}
+			joined := ""
+			for _, e := range errs {
+				joined += e.Error() + "\n"
+			}
+			if !strings.Contains(joined, tc.wantInError) {
+				t.Errorf("error %q must identify %q", joined, tc.wantInError)
+			}
+		})
+	}
+	// Positive controls: both the real checkout and an unmodified copy pass.
+	if errs := CheckImagePins(repoRoot()); len(errs) > 0 {
+		t.Fatalf("real checkout failed image pin contract: %v", errs)
+	}
+	if errs := CheckImagePins(copyImageRepo(t)); len(errs) > 0 {
 		t.Fatalf("unmodified script set failed: %v", errs)
 	}
 }

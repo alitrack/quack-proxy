@@ -2,7 +2,7 @@
 
 > Product Requirements Document | 原始稿 v0.1 | 2026-05-29
 > Author: alitrack
-> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-18（**r16：收口 r15 结论在正文的残留措辞** —— §3.3 / §7 / §9 的历史 `⚠️` 批注补上时点声明并指向头部状态表，消除 R-17 仍被写成「待设计决策」的自相矛盾；产品状态、门禁、代码均未变。**r15：按 §4.2 与 §8 既有决策验收「外部代理终止 TLS」部署方案，并把「产品接入 TLS 属需甲方拍板」的口径纠正**，见下表「外部 TLS 终止部署验收」与 §4.3；r14：执行 §4.2 既有修订要求 —— token 默认不落盘 + 显式开关；r13：CI 门禁契约机器可验证；r12 引擎原生 TLS 能力实证见「内建 TLS 能力边界」与 §4.1）
+> 状态修订 2026-11-13（依据六领域专家评审）；最近更新 2026-11-19（**r17：把 4 个进入必需门禁的容器镜像默认值从浮动 tag 改为 sha256 digest pin，并用 `internal/cicontract.CheckImagePins` / `CheckNoImageOverrides` 机器化** —— 闭环 r13 契约「供应链 pin」声明的覆盖面盲区；**r16：收口 r15 结论在正文的残留措辞** —— §3.3 / §7 / §9 的历史 `⚠️` 批注补上时点声明并指向头部状态表，消除 R-17 仍被写成「待设计决策」的自相矛盾；产品状态、门禁、代码均未变。**r15：按 §4.2 与 §8 既有决策验收「外部代理终止 TLS」部署方案，并把「产品接入 TLS 属需甲方拍板」的口径纠正**，见下表「外部 TLS 终止部署验收」与 §4.3；r14：执行 §4.2 既有修订要求 —— token 默认不落盘 + 显式开关；r13：CI 门禁契约机器可验证；r12 引擎原生 TLS 能力实证见「内建 TLS 能力边界」与 §4.1）
 >
 > **本文不再作为愿景稿使用。** 原始 v0.1 内容保留作背景，但所有功能声明必须对照下表与 `docs/SCOPE.md`。凡标记「未实现 / 已放弃」的条目，README 不得再作为既有能力宣传。边界与成功判据以 `SCOPE.md` 为准，缺陷与整改进度以 `REMEDIATION.md` 为准。
 
@@ -23,7 +23,7 @@
 | Windows 支持 | §7 §8 §10 | **已放弃并收口（r9）** | 三处章节互相矛盾（R-18）。r9 在真实 Windows 上实证产物不可用后：**release 不再发布 Windows 二进制**、修掉 `lookupBin` 的 POSIX mode 位误判、二进制启动时显式拒绝并给出 WSL2 替代路径，新增必需 CI job `windows-runtime-guard` |
 | 性能：83K / 169K QPS | `benchmark.md` | **口径错误，已诚实化** | README 改为 historical benchmark 并注明测量对象；新增可复现的真实 `ATTACH/SELECT` 基准脚本与实测数字（R-08） |
 | 真实引擎 / 进程组 E2E | — | **已补齐** | Go 集成测试（真实进程组，`-race` 通过）+ `scripts/quack-e2e.sh`（真实 DuckDB v2.0.0 + Quack + token 认证，实跑通过）（R-15） |
-| 供应链：Actions pin / 产物签名 / 版本 pin | — | **已补齐** | 全 SHA pin、cosign keyless 签名、govulncheck 版本 pin、DuckDB v2.0.0 + SHA256、签名 core 扩展（R-14 / R-16 / R-19） |
+| 供应链：Actions pin / 镜像 digest pin / 产物签名 / 版本 pin | — | **已补齐** | 全 SHA pin、cosign keyless 签名、govulncheck 版本 pin、DuckDB v2.0.0 + SHA256、签名 core 扩展（R-14 / R-16 / R-19）；**r17 补上门禁容器镜像**：4 个默认值改 `repo@sha256:<64hex>`，`CheckImagePins` 强制格式/跨脚本一致、`CheckNoImageOverrides` 禁止 CI 绕过。本环境 registry 探测 EOF，GitHub runner 首次按 digest 拉取未验证，digest 需主动轮换 |
 | 并发安全：锁内阻塞 / 串行停机 | §3.3 | **已修** | `checkAll` 四段式锁外化、并行 `StopAll`（R-03 / R-12） |
 | 停止后分片端口释放 / 无孤儿进程 | §3.3 §5 | **已修** | 由最终真实引擎 E2E 复跑发现：`cmd.Wait()` 只回收 bash 组长，DuckDB 后代仍持端口。现按进程组确认退出 + 超时整组 SIGKILL，并有忽略 SIGTERM 的回归用例（R-21） |
 | daemon 崩溃后的重启行为 | §3.3 §6 | **已修（检测侧）** | 演练证实孤儿分片会留占端口，直接重启会报假 `healthy`；r5 起 `startShard` 预检端口占用并 fail loud（R-22）。孤儿自动接管属真 HA，**未实现** |

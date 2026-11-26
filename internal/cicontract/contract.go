@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -258,7 +259,7 @@ func CheckOfflineEnv(wf *Workflow) []error {
 }
 
 // Validate runs every contract check against both workflows AND against the
-// shell scripts that declare the pinned engine hashes.
+// shell scripts that declare the pinned engine hashes and gate image digests.
 func Validate(ci, release *Workflow, pinPrefixes []string, repoRoot string) []error {
 	var errs []error
 	errs = append(errs, CheckRequiredGates(ci)...)
@@ -268,7 +269,9 @@ func Validate(ci, release *Workflow, pinPrefixes []string, repoRoot string) []er
 	errs = append(errs, CheckCacheContract(ci, pinPrefixes)...)
 	errs = append(errs, CheckNeedsLinkage(ci)...)
 	errs = append(errs, CheckOfflineEnv(ci)...)
+	errs = append(errs, CheckNoImageOverrides(ci)...)
 	errs = append(errs, CheckScriptPins(repoRoot)...)
+	errs = append(errs, CheckImagePins(repoRoot)...)
 	return errs
 }
 
@@ -376,6 +379,110 @@ func CheckScriptPins(repoRoot string) []error {
 		errs = append(errs, fmt.Errorf("verify-engine-tls.sh is missing CLI_SHA256"))
 	} else if tls["CLI_SHA256"] != base["CLI_SHA256"] {
 		errs = append(errs, fmt.Errorf("verify-engine-tls.sh CLI_SHA256=%q != %s CLI_SHA256=%q", tls["CLI_SHA256"], pinnedScripts[0], base["CLI_SHA256"]))
+	}
+	return errs
+}
+
+// ---------------------------------------------------------------------------
+// r17: container-image supply chain.
+//
+// Every `uses:` has been SHA-pinned since r5 and machine-checked by
+// CheckSHAPins, but the images that the REQUIRED real-system gates actually
+// execute were still floating tags (including alpine:latest, which is
+// republished constantly). A republished tag silently changes what a required
+// gate runs, so "nine gates are unconditionally required" was only as strong
+// as an unversioned image. The scripts' DEFAULT images are now pinned by
+// manifest digest. Operators may still override them locally; CI must not
+// (CheckNoImageOverrides), otherwise the pin is decorative.
+// ---------------------------------------------------------------------------
+
+// imageDefaultRE captures the default value of a shell image constant, e.g.
+//
+//	IMAGE="${PLAINTEXT_IMAGE:-python@sha256:...}"
+//
+// It deliberately anchors at the start of a line so usage examples in
+// comments cannot be mistaken for the value CI actually uses.
+var imageDefaultRE = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*_IMAGE|IMAGE)="\$\{[A-Z][A-Z0-9_]*:-([^"]+)\}"$`)
+
+// digestImageRE is the supply-chain standard for gate images: a repository
+// plus a FULL 64-hex sha256 manifest digest, never a floating tag.
+var digestImageRE = regexp.MustCompile(`^[a-z0-9._/-]+@sha256:[0-9a-f]{64}$`)
+
+// imageOverrideMarkers are the ways a workflow step could bypass a
+// digest-pinned default by supplying a (possibly tag-based) image of its own.
+var imageOverrideMarkers = []string{
+	"--image", "--client-image",
+	"PLAINTEXT_IMAGE=", "PLAINTEXT_HAPROXY_IMAGE=",
+	"VIP_IMAGE=", "VIP_CLIENT_IMAGE=",
+}
+
+// CheckImagePins asserts every gate image default is digest-pinned and that
+// the same repository is pinned to the SAME digest across scripts (e.g. the
+// shared haproxy image must be rotated in both drills together). It scans all
+// scripts/*.sh, so a newly added drill is covered without editing this file.
+func CheckImagePins(repoRoot string) []error {
+	paths, err := filepath.Glob(filepath.Join(repoRoot, "scripts", "*.sh"))
+	if err != nil {
+		return []error{err}
+	}
+	var errs []error
+	total := 0
+	byRepo := map[string]map[string]string{}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return []error{err}
+		}
+		name := filepath.Base(path)
+		for _, m := range imageDefaultRE.FindAllStringSubmatch(string(data), -1) {
+			total++
+			val := m[2]
+			if !digestImageRE.MatchString(val) {
+				errs = append(errs, fmt.Errorf("%s: %s defaults to %q, which is not a sha256 digest-pinned image (floating tags are forbidden in required gates)", name, m[1], val))
+				continue
+			}
+			parts := strings.SplitN(val, "@sha256:", 2)
+			if byRepo[parts[0]] == nil {
+				byRepo[parts[0]] = map[string]string{}
+			}
+			byRepo[parts[0]][name] = parts[1]
+		}
+	}
+	// Guard against the regex quietly going stale (e.g. a renamed variable
+	// style) and turning this check into a tautology.
+	if total < 4 {
+		errs = append(errs, fmt.Errorf("expected at least 4 digest-pinned default gate images, found %d (image pin regex may be stale)", total))
+	}
+	for repo, perScript := range byRepo {
+		var scripts []string
+		for script := range perScript {
+			scripts = append(scripts, script)
+		}
+		sort.Strings(scripts)
+		want := perScript[scripts[0]]
+		for _, script := range scripts[1:] {
+			if perScript[script] != want {
+				errs = append(errs, fmt.Errorf("image %q is pinned to different digests across gate scripts (%s); rotate them together", repo, strings.Join(scripts, ", ")))
+				break
+			}
+		}
+	}
+	return errs
+}
+
+// CheckNoImageOverrides asserts CI never passes its own image to a gate.
+// Without this, a digest-pinned default could be replaced by a floating tag
+// in one workflow step while every contract check still passed.
+func CheckNoImageOverrides(wf *Workflow) []error {
+	var errs []error
+	for id, job := range wf.Jobs {
+		for i, step := range job.Steps {
+			for _, marker := range imageOverrideMarkers {
+				if strings.Contains(step.Run, marker) {
+					errs = append(errs, fmt.Errorf("ci.yml: job %q step %d sets %q, which bypasses the digest-pinned default image", id, i, marker))
+				}
+			}
+		}
 	}
 	return errs
 }

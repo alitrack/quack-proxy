@@ -2,7 +2,9 @@
 #
 # Supply chain: every action is pinned to a full commit SHA and the workflow
 # runs with `contents: read` only. The govulncheck binary is version-pinned
-# too (no @latest). See docs/SECURITY.md.
+# too (no @latest). Since r17 the container images used by the real-system
+# gates are pinned by manifest digest as well (never floating tags); see
+# internal/cicontract.CheckImagePins. See docs/SECURITY.md.
 #
 # The Go suite is hermetic (no DuckDB or network needed): lifecycle tests use
 # stub duckdb_bin executables. One integration test forks a REAL child
@@ -286,8 +288,9 @@ jobs:
     # disable_ssl=true, the dead proxy.ssl config and plain gen-proxy output
     # are unchanged. If TLS is ever added to the PRODUCT, the audit half is
     # EXPECTED to fail: update assertions and docs, do not delete the gate.
-    # External deps: python:3.11-slim + haproxy:2.8-alpine (both already
-    # used by other gates), pulls retried 3 times; all else built locally.
+    # External deps: python + haproxy, both digest-pinned by default (r17,
+    # enforced by CheckImagePins) and already used by other required gates;
+    # pulls retried 3 times; all else built locally.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -316,7 +319,8 @@ jobs:
     # the entry point recovers, the session and data do not. R-04 still holds.
     # Negative controls: VIP unowned, VIP withdrawn, multi-shard config
     # refused by gen-proxy, and a broken file refused by `haproxy -c -f`.
-    # The only external dependency is pulling two small images (3 retries).
+    # The only external dependency is pulling two small images (3 retries),
+    # both digest-pinned by default since r17 (CheckImagePins enforces it).
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

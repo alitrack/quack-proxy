@@ -1,6 +1,6 @@
 # 安全说明（SECURITY）
 
-> 适用版本：v0.2.0 + 本次整改补丁（2026-11-18，r16）
+> 适用版本：v0.2.0 + 本次整改补丁（2026-11-19，r17）
 > 配套阅读：`SCOPE.md`（边界）、`REMEDIATION.md`（缺陷台账与状态）
 
 ## 1. 信任模型
@@ -30,6 +30,7 @@
 - 停机时确认整个进程组退出：组长 `cmd.Wait()` 之后仍以 `kill(-pid, 0)` 探测，残留后代整组 SIGKILL，避免「已停止」却仍占用分片端口（POSIX；R-21）
 - 启动前检查分片端口是否已被占用，占用即拒绝启动并给出明确错误，避免 daemon 崩溃后重启时把「孤儿应答的健康探测」误报为自己的 `healthy`（R-22）
 - 供应链：Actions 全 SHA pin、`govulncheck@v1.9.0` 版本 pin 且为**必需**门禁、release 产物 cosign 签名、DuckDB CLI SHA256 pin
+- **门禁镜像 digest pin（r17）**：`verify-plaintext.sh` / `verify-vip-failover.sh` 的 4 个默认镜像原本是浮动 tag（含持续重发的 `alpine:latest`），现改为 `repo@sha256:<64hex>`；`internal/cicontract.CheckImagePins` 强制格式与跨脚本一致性，`CheckNoImageOverrides` 禁止 CI 用 `--image` 等参数绕过。本机 digest 零下载命中、两个门禁实跑 RC=0（linux/amd64）；**本环境 registry 探测返回 EOF，未验证 digest 是 manifest list 还是单平台 manifest，也未验证 GitHub runner 首次按 digest 拉取**。digest 需随基础镜像升级主动轮换，上游 GC 旧 digest 会让 CI 失败 —— 与 Actions SHA pin 轮换同性质，不是「做不到」；显式覆盖仅用于本地/离线复跑。
 - 发布二进制固定用 **go1.27.4**（或更新的已修补工具链）构建：`go1.26.11` 实测有 11 项 Go 标准库告警，`go1.27.4` 实测 `No vulnerabilities found`
 - 部署产物经真实二进制校验：`haproxy -c -f`、`systemd-analyze verify`、systemd 实机安装演练、HAProxy 降权加固验证（均为必需 CI job）
 - LAN 明文风险由 `plaintext-audit` 必需 job 用真实抓包守住（证明弱点存在，防止文档悄悄宣称已有 TLS）；**r14 起同一 job 还硬断言 `status.json` 默认不含 token**（`STATUS_TOKEN_AT_REST=0`，连空 `token` 字段都拒绝）
