@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/alitrack/quack-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/alitrack/quack-proxy/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
-[![DuckDB](https://img.shields.io/badge/DuckDB-%E2%89%A51.5.2-FFF000?style=flat&logo=duckdb)](https://duckdb.org)
+[![DuckDB](https://img.shields.io/badge/DuckDB-1.5.2%20–%202.0.1-FFF000?logo=duckdb)](https://duckdb.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built by Hermes](https://img.shields.io/badge/built%20by-Hermes%20Agent-8A2BE2)](https://hermes-agent.nousresearch.com)
 
@@ -187,8 +187,9 @@ the status file:
 | State | Meaning |
 |-------|---------|
 | `starting` | Process spawned; Quack not yet answering. For the first **30s** after any (re)start, a failing health check keeps it here rather than restarting it — this absorbs a slow first boot (DuckDB `INSTALL`/`LOAD` can take tens of seconds before `quack_serve` binds). |
-| `healthy` | Answering the health check. |
+| `healthy` | Answering the health check **and** having passed the auth probe. Until the probe reports, a listening shard stays `starting` and publishes no attach string. |
 | `unhealthy` | Failing the health check and inside a restart backoff window. |
+| `auth-failed` | The endpoint listens but refuses a real client round-trip made with the shard's own token. **No restart is attempted** — a restart cannot repair the engine binary — and no `coordinator_attach_sql` is published. Fix `duckdb_bin`. |
 | `stopped` | **Terminal** — the shard exhausted its retry budget (10 consecutive failed restarts) and has been parked. It stays stopped (no further churn) until the config is reloaded or the daemon is restarted. |
 
 On each unhealthy detection after the startup grace, the shard is restarted
@@ -197,6 +198,30 @@ attempt counter. A healthy response resets both. The design goal is: a
 transient blip recovers within a second or two, a genuinely broken shard stops
 churning after a bounded number of tries and reports itself clearly, instead
 of killing-and-relaunching forever.
+
+#### The auth probe: a listening port is not a usable shard
+
+Once a shard's port answers, quack-proxy makes **one real client round-trip**
+(`quack_query(..., token := <the shard's own token>)`) and records the outcome
+in `status` as `auth_probe` (`"ok"` or `"failed: …"`). This exists because
+engines whose Quack token authentication is broken behave exactly like healthy
+ones from the outside: the process runs, the port accepts connections, and the
+HTTP health check returns 2xx — while every client, including the server's own
+token, is answered `Authentication failed`. Some DuckDB 2.0.0 alphas do this.
+
+Verified engine builds (`auth probe` pass, client writes work):
+
+| DuckDB | Status |
+|---|---|
+| `v2.0.1` (8d78114e90) | works |
+| `v2.0.0` (d54cbbe3df) | works |
+| `v2.0.0-alpha43355`, `v2.0.0-alpha48730` | works |
+| `v2.0.0-alpha39998` | **token auth broken** — always set `global.duckdb_bin` to a build you verified |
+
+If the probe fails, the shard lands in `auth-failed`, `status` stops
+advertising an attach string for it, and the daemon logs one ERROR line naming
+the binary. Pin `global.duckdb_bin` to the path you verified rather than relying
+on whatever `duckdb` resolves to on `PATH`.
 
 ---
 

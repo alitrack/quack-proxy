@@ -158,6 +158,9 @@ type shardJSON struct {
 	Token           string `json:"token"`
 	Database        string `json:"database"`
 	LastHealthCheck string `json:"last_health_check,omitempty"`
+	// AuthProbe carries the client round-trip result so `status` shows why
+	// a listening shard is still not serving.
+	AuthProbe string `json:"auth_probe,omitempty"`
 }
 
 func runStatus(cfgPath string) {
@@ -183,6 +186,7 @@ func runStatus(cfgPath string) {
 			Token:           r.Token,
 			Database:        r.Database,
 			LastHealthCheck: r.LastCheck,
+			AuthProbe:       r.AuthProbe,
 		}
 		if start, err := time.Parse(time.RFC3339, r.StartTime); err == nil {
 			sj.Uptime = time.Since(start).Round(time.Second).String()
