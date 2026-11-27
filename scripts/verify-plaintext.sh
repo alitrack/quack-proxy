@@ -135,6 +135,11 @@ log()  { echo "==> $*"; }
 
 CLEAN_WORK=0
 if [[ -z "$WORK" ]]; then WORK="$(mktemp -d)"; CLEAN_WORK=1; else mkdir -p "$WORK"; fi
+# The official haproxy image runs as the unprivileged `haproxy` user, so a
+# 0700 mktemp directory bind-mounted into it is unreadable ("Cannot open
+# configuration file ... Permission denied"). Make the directory traversable
+# and keep generated files world-readable; the config carries no secrets.
+chmod 755 "$WORK"
 # Git Bash needs a Windows-style path for -v; Linux CI uses the path as-is.
 if command -v cygpath >/dev/null 2>&1; then
   VOL="$(cygpath -w "$WORK" | tr '\\' '/')"
@@ -495,17 +500,26 @@ log "loopback shard B reachable with greeting ${LOOP_GREETING}"
 
 # Negative control for the vendor parser: a malformed operator config must be
 # rejected, otherwise haproxy -c passing below proves nothing.
-docker run --rm --network "container:$SRV" -v "$VOL:/work:ro" \
+# `--user root` for the two validation calls only: config parsing needs no
+# privilege drop, and it keeps this control independent of the image's default
+# user. The running terminator below keeps the image's own user.
+chmod 644 "$WORK"/haproxy*.cfg 2>/dev/null || true
+docker run --rm --user root --network "container:$SRV" -v "$VOL:/work:ro" \
   --entrypoint haproxy "$HAPROXY_IMAGE" -c -f /work/haproxy-bad.cfg \
   > "$WORK/haproxy-bad.log" 2>&1 || true
+if grep -qiE "permission denied|cannot open" "$WORK/haproxy-bad.log"; then
+  cat "$WORK/haproxy-bad.log" >&2
+  fail "haproxy could not read the mounted config; the negative control is void"
+fi
 grep -qiE "unknown|error|parsing|unable" "$WORK/haproxy-bad.log" \
-  || fail "HAProxy accepted a malformed config; negative control is broken"
+  || { cat "$WORK/haproxy-bad.log" >&2
+       fail "HAProxy accepted a malformed config; negative control is broken"; }
 echo "HAPROXY_BAD_CONFIG_REJECTED=1 (vendor parser really checks the operator config)"
 
-docker run --rm --network "container:$SRV" -v "$VOL:/work:ro" \
+docker run --rm --user root --network "container:$SRV" -v "$VOL:/work:ro" \
   --entrypoint haproxy "$HAPROXY_IMAGE" -c -f /work/haproxy.cfg \
   > "$WORK/haproxy-check.log" 2>&1 \
-  || { cat "$WORK/haproxy-check.log" >&2; fail "HAProxy rejected the external TLS termination config"; }
+  || { cat "$WORK/haproxy-check.log" >&2; fail "haproxy rejected the external TLS termination config"; }
 echo "HAPROXY_TLS_CONFIG_VALID=1 (real haproxy -c -f on the external terminator)"
 
 log "starting real HAProxy TLS terminator (shared netns, plain leg over loopback)"

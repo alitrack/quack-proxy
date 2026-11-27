@@ -114,9 +114,18 @@ command -v ps       >/dev/null 2>&1 || fail "ps not found (procps)"
 [[ -f "$UNIT_SRC" ]] || fail "unit not found: $UNIT_SRC"
 
 STATE="$(systemctl is-system-running 2>/dev/null || true)"
+# A GitHub runner reports "starting" forever (snapd and friends never reach
+# "running"), while systemd is still PID 1 and installs units normally. The
+# property this drill needs is "PID 1 is systemd", not "every unit finished".
+PID1="$(ps -p 1 -o comm= 2>/dev/null | tr -d ' ')"
 case "$STATE" in
-  running|degraded) log "systemd is-system-running=$STATE ($(systemctl show -p Version --value 2>/dev/null))" ;;
-  *) fail "systemd is not running as PID 1 (is-system-running=$STATE)" ;;
+  running|degraded)
+    log "systemd is-system-running=$STATE ($(systemctl show -p Version --value 2>/dev/null))" ;;
+  starting)
+    [[ "$PID1" == "systemd" ]] || fail "systemd reports 'starting' but PID 1 is '$PID1', not systemd"
+    log "systemd is-system-running=$STATE (PID 1 is systemd $(systemctl show -p Version --value 2>/dev/null)); proceeding" ;;
+  *)
+    fail "systemd is not running as PID 1 (is-system-running=$STATE, PID 1='$PID1')" ;;
 esac
 
 if command -v python3 >/dev/null 2>&1; then HTTP=python3; else
