@@ -6,7 +6,16 @@
 #
 # No manual publishing step: `go install .../cmd/quack-proxy@latest` and the
 # Releases page both track the newest tag automatically.
+#
+# Supply chain (R-14): every action is pinned to a full commit SHA, the
+# workflow runs with least privilege, and SHA256SUMS is signed with cosign
+# keyless OIDC. SHA256SUMS alone is an integrity check; the .sig/.pem pair
+# additionally proves the artifact came from this repository's release
+# workflow. Verify with the command in docs/SECURITY.md.
 name: Release
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -20,29 +29,41 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # r9 (R-18): Windows artifacts are NO LONGER PUBLISHED. PRD §8 has
+        # always listed Windows as a non-goal, but we kept shipping a signed
+        # .exe whose `version` worked while `start` could not host shards.
+        # CI still cross-compiles windows/amd64 as a source-compatibility
+        # check, and the required `windows-runtime-guard` job proves the
+        # binary now refuses to start with an actionable error. Do not
+        # re-add this artifact without a POSIX-free shard launcher.
+        #
+        # `include:` is required: a bare sequence directly under `matrix:` is
+        # not a valid GitHub Actions matrix mapping (upstream release fixes).
         include:
           - { os: linux,   arch: amd64 }
           - { os: linux,   arch: arm64 }
           - { os: darwin,  arch: amd64 }
           - { os: darwin,  arch: arm64 }
-          - { os: windows, arch: amd64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      # Pin to a PATCHED toolchain, not go.mod's 1.25.0 minimum: a real
+      # govulncheck run against go1.26.11 reported 11 Go stdlib advisories,
+      # while go1.27.4 reports zero. Artifacts shipped to users must be
+      # built with the same patched stdlib the required vuln-scan job checks.
+      # The 1.25/1.26 CI matrix still guards source compatibility.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version-file: go.mod
+          go-version: '1.27.4'
 
       - name: Build
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          suffix=""
-          if [ "$GOOS" = "windows" ]; then suffix=".exe"; fi
           GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
-            -o "quack-proxy-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}${suffix}" \
+            -o "quack-proxy-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}" \
             ./cmd/quack-proxy
 
       - name: Smoke (native build reports its version)
@@ -55,13 +76,9 @@ jobs:
       - name: Package
         run: |
           base="quack-proxy-${GITHUB_REF_NAME}-${{ matrix.os }}-${{ matrix.arch }}"
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            zip -q "${base}.zip" "${base}.exe"
-          else
-            tar czf "${base}.tar.gz" "${base}"
-          fi
+          tar czf "${base}.tar.gz" "${base}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dist-${{ matrix.os }}-${{ matrix.arch }}
           path: "quack-proxy-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.*"
@@ -71,9 +88,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      contents: write
+      contents: write   # create the GitHub Release
+      id-token: write   # cosign keyless OIDC certificate
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           pattern: release-dist-*
@@ -84,6 +102,17 @@ jobs:
         run: |
           sha256sum quack-proxy-* > SHA256SUMS
           cat SHA256SUMS
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign checksums (keyless OIDC)
+        working-directory: dist
+        run: |
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+          ls -l SHA256SUMS.sig SHA256SUMS.pem
 
       - name: Create GitHub Release
         env:
@@ -96,4 +125,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            quack-proxy-* SHA256SUMS
+            quack-proxy-* SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem

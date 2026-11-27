@@ -1,12 +1,41 @@
-# CI for quack-proxy: build, vet, gofmt, and the full Go test suite, plus
-# the Python statement-splitter unit tests. The suite is hermetic (no DuckDB
-# or network needed): lifecycle tests use stub duckdb_bin executables.
+# CI for quack-proxy.
+#
+# Supply chain: every action is pinned to a full commit SHA and the workflow
+# runs with `contents: read` only. The govulncheck binary is version-pinned
+# too (no @latest). Since r17 the container images used by the real-system
+# gates are pinned by manifest digest as well (never floating tags); see
+# internal/cicontract.CheckImagePins. See docs/SECURITY.md.
+#
+# The Go suite is hermetic (no DuckDB or network needed): lifecycle tests use
+# stub duckdb_bin executables. One integration test forks a REAL child
+# process group and drives start -> kill -> self-heal -> stop; POSIX-only
+# cases skip on Windows (R-18). Since r9 the required `windows-runtime-guard`
+# job checks on a real Windows runner that any cross-compiled binary refuses
+# to start with an actionable message. Since r10 `quack-e2e` runs a real
+# DuckDB + Quack engine strictly offline from a SHA256-pinned cache and is
+# REQUIRED on pull requests too; see the job comment for the cache contract.
+# Since r11 the required `vip-failover` job drives the generated HAProxy
+# config through a real floating-IP move between two containers; it also
+# proves that failover does NOT preserve sessions/data (R-04).
+# Since r12 the required `engine-tls-capability` job proves with the same
+# pinned engine that Quack NATIVELY supports TLS (TLSv1.3 handshake, cert
+# fingerprint pinning) while quack-proxy's boot SQL hardcodes
+# disable_ssl=true. This is an engine audit, NOT a product fix: R-05 stays
+# open. It reuses quack-e2e's cache via `needs`, so it adds ZERO downloads.
+# Since r15 the required `plaintext-audit` gate also ACCEPTS the PRD's
+# existing deployment decision (PRD §4.2 / SCOPE §3: no built-in TLS,
+# terminate in an external proxy) end to end with a real HAProxy terminator.
+# Still NINE gates (no new job); the product still serves plaintext HTTP.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   go:
@@ -15,11 +44,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        go: ["1.25", "1.26"]
+        go: ["1.25", "1.26", "1.27"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ matrix.go }}
 
@@ -29,14 +58,26 @@ jobs:
       - name: vet
         run: go vet ./...
 
+      - name: test (race + coverage gate)
+        run: |
+          go test ./... -race -count=1 -coverprofile=coverage.out
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "total coverage: ${total}%"
+          [ "${total%%.*}" -ge 50 ] || { echo "coverage below 50%"; exit 1; }
+
+      # The vulnerability scan lives in its own REQUIRED job (vuln-scan)
+      # pinned to a patched toolchain; see the note there. It used to live
+      # here with continue-on-error: the 1.25 job could not even install
+      # govulncheck v1.9.0, and the 1.26 job had a non-zero stdlib baseline.
+
       - name: build (linux)
         run: go build ./...
 
+      # Compile coverage only. The Windows binary currently cannot run:
+      # bash/tail are hardcoded and the Windows branch has no process-group
+      # semantics (R-18). Do not read this step as Windows support.
       - name: build (windows cross-compile)
         run: GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/quack-proxy
-
-      - name: test
-        run: go test ./... -count=1
 
   python:
     name: splitter tests (python ${{ matrix.py }})
@@ -46,9 +87,267 @@ jobs:
       matrix:
         py: ["3.10", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.py }}
       - name: run splitter tests (no duckdb needed)
         run: python3 examples/duckdb_serve_host_test.py
+
+  quack-e2e:
+    name: real DuckDB + Quack E2E (pinned v2.0.0, offline cache)
+    runs-on: ubuntu-latest
+    # REQUIRED on EVERY event including pull requests (r10). Previously the
+    # test process itself fetched GitHub Releases + the signed extension CDN
+    # on every run (transient 5xx / early-EOF), so PRs had to be advisory.
+    # Now prefetch-quack-e2e.sh fills a SHA256-verified cache on the runner
+    # ONLY on a cache miss, and quack-e2e.sh runs STRICTLY OFFLINE from it:
+    # no curl, no INSTALL, no CDN dependency during the test. The cache also
+    # pins httpfs: DuckDB v2.0.0 cannot write a disk-backed database with its
+    # read-only crypto module alone, and an isolated HOME cannot autoload
+    # httpfs from the network. r9's "offline" run still had network and let
+    # DuckDB fetch httpfs implicitly; r10 closes that hole. A missing or
+    # corrupted cache fails loudly instead of silently reaching the network.
+    # Residual risk, stated honestly: a first-ever cache miss still needs the
+    # upstream once; retries + runner-side (not in-container) fetches make
+    # that rare, but it is not "impossible". No advisory escape hatch.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: restore pinned engine cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/quack-e2e-cache
+          key: quack-e2e-v2.0.0-cli-c6507206-quack-9c893bd5-httpfs-77e6c429-v2
+          restore-keys: |
+            quack-e2e-v2.0.0-
+      - name: prefetch pinned CLI + signed extension (cache miss only)
+        run: bash scripts/prefetch-quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
+      - name: assert cache complete without network
+        run: QUACK_PREFETCH_OFFLINE=1 bash scripts/prefetch-quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
+      - name: run real engine E2E (strictly offline)
+        env:
+          QUACK_E2E_OFFLINE: '1'
+        run: bash scripts/quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache" --benchmark 50
+
+  engine-tls-capability:
+    name: engine TLS capability audit (R-05)
+    runs-on: ubuntu-latest
+    # Required gate (r12). Honesty guard for the R-05 ledger: "built-in TLS"
+    # used to be lumped into "needs a design decision", which reads like a
+    # capability limit. It is not. Using the EXACT SAME pinned v2.0.0 engine
+    # and signed extensions as quack-e2e, this proves Quack natively serves
+    # HTTPS (TLSv1.3), rejects plaintext on that port, and pins the client to
+    # the server certificate fingerprint -- while quack-proxy's boot SQL
+    # deliberately hardcodes disable_ssl = true.
+    #
+    # SCOPE, do not overstate: this is an ENGINE capability audit. It does NOT
+    # mean quack-proxy terminates TLS, does NOT change product behaviour, and
+    # does NOT fix the LAN cleartext risk of a wrongly exposed shard (R-05
+    # still open there); token-at-rest was separately fixed in r14. PRD §4.2
+    # / SCOPE §3 already decided the product does NOT ship built-in TLS --
+    # terminate in an external reverse proxy; r15 accepted that deployment
+    # end to end in plaintext-audit. Enabling TLS IN THE PRODUCT would be a
+    # SCOPE CHANGE (certificate lifecycle, fingerprint delivery, HTTPS health
+    # checks, attach_sql contract, generated HAProxy config). If that ever
+    # happens this gate is EXPECTED to fail (it asserts the hardcoded
+    # disable_ssl=true); update the gate and docs together, same contract
+    # as plaintext-audit.
+    #
+    # Zero new downloads: `needs: quack-e2e` guarantees the SHA256-pinned
+    # cache has already been filled and saved, and the identical cache key
+    # restores it. A strict offline assertion makes any cache miss a loud
+    # failure instead of a silent network fallback. No advisory escape hatch.
+    needs: quack-e2e
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: restore pinned engine cache (filled by quack-e2e)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/quack-e2e-cache
+          key: quack-e2e-v2.0.0-cli-c6507206-quack-9c893bd5-httpfs-77e6c429-v2
+          restore-keys: |
+            quack-e2e-v2.0.0-
+      - name: assert cache complete without network
+        run: QUACK_PREFETCH_OFFLINE=1 bash scripts/prefetch-quack-e2e.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
+      - name: prove engine-native TLS (strictly offline)
+        env:
+          QUACK_TLS_OFFLINE: '1'
+        run: bash scripts/verify-engine-tls.sh --cache-dir "${{ runner.temp }}/quack-e2e-cache"
+
+  crash-drill:
+    name: daemon crash drill (R-01 / R-22)
+    runs-on: ubuntu-latest
+    # No external downloads: builds the daemon plus a tiny local HTTP stub,
+    # SIGKILLs the daemon, then asserts a restart is REFUSED while the orphan
+    # still owns the port. Unlike quack-e2e this is a required gate.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: run daemon crash drill
+        run: bash scripts/daemon-crash-drill.sh
+
+  deploy-verify:
+    name: real HAProxy + systemd config validation
+    runs-on: ubuntu-latest
+    # Required gate, no third-party downloads: validate the config produced
+    # by `gen-proxy` with the vendor's own parser, prove it really forwards
+    # traffic, and run `systemd-analyze verify` (with a negative control) on
+    # the shipped unit. See scripts/verify-deploy.sh.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: install real vendor tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq haproxy systemd curl
+      - name: make ExecStart and User resolvable for systemd-analyze
+        run: |
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/quack-proxy >/dev/null
+          sudo chmod 0755 /usr/local/bin/quack-proxy
+          sudo useradd -r -s /usr/sbin/nologin quack-proxy || true
+      - name: build CLI for the hardening check
+        run: go build -o /tmp/quack-proxy ./cmd/quack-proxy
+      - name: validate generated HAProxy config + systemd unit
+        run: bash scripts/verify-deploy.sh --forward
+      # R-23: `haproxy -c -f` says "valid" even for a root/no-chroot config.
+      # This step starts the real binary and proves the opt-in hardened
+      # template drops privileges and still forwards traffic. Two negative
+      # controls: an unprovisioned account is rejected, and (HAProxy >= 3.x)
+      # the unhardened config really does emit the root/chroot warnings.
+      - name: verify R-23 production hardening with real HAProxy
+        run: sudo bash scripts/verify-hardening.sh --proxy-bin /tmp/quack-proxy
+
+  systemd-drill:
+    name: non-root systemd install drill (R-06)
+    runs-on: ubuntu-latest
+    # `systemd-analyze verify` only PARSES a unit. This job installs the
+    # shipped unit into a real systemd (the runner already boots one as PID
+    # 1), starts it as an unprivileged account and asserts RuntimeDirectory,
+    # 0600 pid/status, healthy shard, token redaction, and a clean stop with
+    # no orphan. Negative control: the same binary started as that account
+    # WITHOUT RuntimeDirectory must be refused. Required gate; no downloads.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      # Build before sudo: `sudo` resets PATH, so Go would not be visible.
+      - name: build daemon + drill stub
+        run: |
+          go build -o /tmp/quack-proxy ./cmd/quack-proxy
+          go build -o /tmp/drill-stub ./scripts/drill-stub.go
+      - name: run real systemd install drill
+        run: sudo bash scripts/systemd-install-drill.sh --proxy-bin /tmp/quack-proxy --stub-bin /tmp/drill-stub
+
+  vuln-scan:
+    name: govulncheck (required, patched toolchain)
+    runs-on: ubuntu-latest
+    # r5 found this scan had NEVER actually run: govulncheck v1.9.0 needs
+    # Go >= 1.26 but the step was pinned to the 1.25 matrix job and its
+    # `continue-on-error` swallowed the install failure. After moving it to
+    # 1.26, a real scan reported 11 Go stdlib findings, so it stayed advisory.
+    # Those findings are stdlib advisories fixed in a newer toolchain: a real
+    # scan with go1.27.4 + govulncheck@v1.9.0 reports "No vulnerabilities
+    # found" (SCAN_RC=0). The baseline is now zero, so this is a REQUIRED
+    # gate. Shipped release binaries MUST be built with >= go1.27.4 too
+    # (see release.yml) or the artifact would still carry the old stdlib.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27.4'
+      - name: govulncheck
+        run: |
+          go version
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
+
+  plaintext-audit:
+    name: LAN cleartext audit (R-05)
+    runs-on: ubuntu-latest
+    # Required gate. Half AUDIT, half ACCEPTANCE of the PRD's EXISTING
+    # deployment decision (PRD §4.2 / SCOPE §3: no built-in TLS, terminate
+    # in an external proxy). It proves with a real AF_PACKET capture that a
+    # shard exposed on a LAN interface carries its token in cleartext, that
+    # a TLS control channel on the same segment does not, and (r15) that a
+    # loopback-bound shard behind a real HAProxy TLS terminator answers the
+    # client over HTTPS with NO readable credential on the LAN and ZERO
+    # payload on the backend port. It also uses the real CLI to confirm
+    # proxy.ssl.enabled=true is rejected. NOT a product TLS feature:
+    # disable_ssl=true, the dead proxy.ssl config and plain gen-proxy output
+    # are unchanged. If TLS is ever added to the PRODUCT, the audit half is
+    # EXPECTED to fail: update assertions and docs, do not delete the gate.
+    # External deps: python + haproxy, both digest-pinned by default (r17,
+    # enforced by CheckImagePins) and already used by other required gates;
+    # pulls retried 3 times; all else built locally.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: build daemon + drill stub (static)
+        run: |
+          CGO_ENABLED=0 go build -o /tmp/quack-proxy ./cmd/quack-proxy
+          CGO_ENABLED=0 go build -o /tmp/drill-stub ./scripts/drill-stub.go
+      - name: prove cleartext token on the wire
+        run: bash scripts/verify-plaintext.sh --proxy-bin /tmp/quack-proxy --stub-bin /tmp/drill-stub
+
+  vip-failover:
+    name: HAProxy + VIP failover drill (R-04 / R-23)
+    runs-on: ubuntu-latest
+    # Required gate (r11). Closes the last "needs real hardware" item on the
+    # ledger: a Docker bridge with NET_ADMIN is enough to move a real /32
+    # floating IP between two containers with gratuitous ARP.
+    #
+    # Honest scope: this does NOT mean quack-proxy provides HA. The product
+    # only WRITES an HAProxy config; the VIP move is performed by the script
+    # (standing in for keepalived / a cloud floating IP). Each node runs a
+    # separate backend with a different greeting and the client asserts that
+    # the peer identity CHANGES after failover (SESSION_DISCONTINUITY=1):
+    # the entry point recovers, the session and data do not. R-04 still holds.
+    # Negative controls: VIP unowned, VIP withdrawn, multi-shard config
+    # refused by gen-proxy, and a broken file refused by `haproxy -c -f`.
+    # The only external dependency is pulling two small images (3 retries),
+    # both digest-pinned by default since r17 (CheckImagePins enforces it).
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: build daemon + drill stub (static)
+        run: |
+          CGO_ENABLED=0 go build -o /tmp/quack-proxy ./cmd/quack-proxy
+          CGO_ENABLED=0 go build -o /tmp/drill-stub ./scripts/drill-stub.go
+      - name: prove the generated config survives a real VIP failover
+        run: bash scripts/verify-vip-failover.sh --proxy-bin /tmp/quack-proxy --stub-bin /tmp/drill-stub
+
+  windows-runtime-guard:
+    name: Windows runtime honesty (R-18)
+    runs-on: windows-latest
+    # Required gate (r9). Release no longer publishes a Windows artifact,
+    # but source must still compile for windows/amd64 AND the binary must
+    # refuse to run with the real reason instead of the old misleading
+    # "duckdb_bin not executable". Uses a nonexistent config path on purpose:
+    # seeing the platform error proves the guard precedes config loading.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: prove the Windows binary refuses to start honestly
+        shell: bash
+        run: bash scripts/verify-windows.sh
