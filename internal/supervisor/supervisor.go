@@ -53,12 +53,25 @@ CALL quack_serve('quack:%s:%d', token = '%s', allow_other_hostname = %t, disable
 	// up and turn a slow boot into a restart loop.
 	defaultStartupGrace = 30 * time.Second
 
+	// authProbeAttempts / authProbeSpacing bound the post-start client
+	// probe: a slow first boot may not accept connections immediately, so
+	// retry a few times before calling the shard broken.
+	authProbeAttempts = 3
+	authProbeSpacing  = 4 * time.Second
+	// authProbeTimeout bounds one probe round-trip.
+	authProbeTimeout = 15 * time.Second
+
 	// probeConcurrency bounds simultaneous health probes. Probing N shards
 	// serially at 2s each used to hold the supervisor mutex for 2*N seconds,
 	// stalling status, reload and shutdown (R-03).
 	probeConcurrency = 8
 	probeTimeout     = 2 * time.Second
 )
+
+// statusAuthFailed is the shard status used when the endpoint listens but
+// refuses its own token. Restarting cannot fix a broken engine, so this
+// status suppresses the restart loop and is reported loudly instead.
+const statusAuthFailed = "auth-failed"
 
 // connectHost maps a bind-only address to a dialable one. 0.0.0.0 and ::
 // are valid listen addresses but cannot be used as client targets.
@@ -132,6 +145,10 @@ type StatusFileRecord struct {
 	Token     string `json:"token,omitempty"`
 	Database  string `json:"database"`
 	LastCheck string `json:"last_health_check,omitempty"`
+	// AuthProbe reports the result of one real client round-trip made with
+	// the shard's own token ("ok", "failed: …", or empty while pending).
+	// A listening port is not evidence of a usable shard.
+	AuthProbe string `json:"auth_probe,omitempty"`
 	AttachSQL string `json:"coordinator_attach_sql"`
 }
 
@@ -180,7 +197,12 @@ type ShardProcess struct {
 	// would reopen a 30s grace on every attempt and swallow the exponential
 	// backoff entirely (R-17).
 	lastStart time.Time
-
+	// AuthProbe is the outcome of one real client round-trip made with the
+	// shard's own token, run once per process. Port-open checks pass on
+	// engines whose quack token auth is broken — the shard then looks
+	// healthy while every client is refused, so this is the only signal
+	// that distinguishes "serving" from "listening".
+	AuthProbe string
 	// initSQLDigest is the sha256 of init_sql_file's CONTENTS at start time.
 	// Reload compares it so editing a policy file restarts the shard even
 	// though its path (and therefore the config struct) is unchanged (R-07).
@@ -422,6 +444,7 @@ func (s *Supervisor) buildStatusLocked() StatusFile {
 		if !sp.lastCheck.IsZero() {
 			rec.LastCheck = sp.lastCheck.Format(time.RFC3339)
 		}
+		rec.AuthProbe = sp.AuthProbe
 		if sp.Status == "healthy" {
 			rec.AttachSQL = fmt.Sprintf("ATTACH 'quack:%s:%d' AS %s;",
 				connectHost(s.cfg.Listener.BindHost), sp.Config.Port, sp.Config.Name)
@@ -508,6 +531,12 @@ func (s *Supervisor) launch(ctx context.Context, sh config.ShardConfig) error {
 	s.mu.Lock()
 	s.shards[sh.Name] = sp
 	s.mu.Unlock()
+	// One real client round-trip with this shard's own token, in the
+	// background: a listening port plus a 2xx /health is not evidence that
+	// clients can connect. Engines with broken quack auth accept the
+	// connection and reject every token — including the server's own — so
+	// the shard would otherwise sit in "healthy" while refusing all work.
+	go s.runAuthProbe(sh.Name, sp)
 	return nil
 }
 
@@ -654,6 +683,132 @@ func (s *Supervisor) startShard(ctx context.Context, sh config.ShardConfig) (*Sh
 	}
 	sp.Config.Token = token
 	return sp, nil
+
+}
+
+// runAuthProbe waits for the endpoint to accept connections, then asks it a
+// question as a client would, using the shard's own token. The result is
+// recorded on the shard and surfaced in the status file.
+func (s *Supervisor) runAuthProbe(name string, sp *ShardProcess) {
+	var lastErr error
+	for attempt := 0; attempt < authProbeAttempts; attempt++ {
+		time.Sleep(authProbeSpacing)
+		if !s.isCurrent(name, sp) {
+			return // superseded by a restart; that process probes itself
+		}
+		if !health.Check(s.bindHost(), sp.Config.Port, s.healthPath(), 2*time.Second) {
+			lastErr = fmt.Errorf("endpoint not accepting connections yet")
+			continue
+		}
+		if err := s.probeAuth(sp); err != nil {
+			lastErr = err
+			continue
+		}
+		s.setAuthProbe(name, sp, "ok")
+		s.logger.Info("auth probe ok", "name", name, "port", sp.Config.Port)
+		return
+	}
+
+	msg := "failed"
+	if lastErr != nil {
+		msg = "failed: " + lastErr.Error()
+	}
+	s.setAuthProbe(name, sp, msg)
+	s.logger.Error("shard listens but refuses its own token — clients cannot connect; check that duckdb_bin is an engine whose quack auth works",
+		"name", name, "port", sp.Config.Port, "error", lastErr)
+}
+
+// probeAuth performs one quack_query round-trip from a separate client
+// process, using the shard's token. Any failure — nonzero exit, timeout, or
+// a response that does not carry the probe value — counts as broken.
+func (s *Supervisor) probeAuth(sp *ShardProcess) error {
+	uri := fmt.Sprintf("quack:%s:%d", s.bindHost(), sp.Config.Port)
+	tok := strings.ReplaceAll(sp.Config.Token, "'", "''")
+	// A per-probe random marker: a fixed constant could be satisfied by stale
+	// or echoed output, a fresh number cannot.
+	marker := 100000 + randInt(900000)
+	sql := fmt.Sprintf(
+		"LOAD quack;\nFROM quack_query('%s', 'SELECT %d AS auth_probe', token := '%s', disable_ssl := true);\n",
+		uri, marker, tok,
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), authProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.cfg.Global.DuckDBBin, "-unsigned", "-c", sql)
+	var out strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%v: %s", err, firstLine(out.String()))
+	}
+	if !strings.Contains(out.String(), fmt.Sprint(marker)) {
+		return fmt.Errorf("probe returned no value: %s", firstLine(out.String()))
+	}
+	return nil
+}
+
+// healthStatus decides the status of a shard whose port answers. "healthy"
+// requires a passed auth probe: a shard that has not proven it accepts its
+// own token must not advertise an attach string, so the window between "port
+// bound" and "probe finished" reads as "starting" rather than "healthy".
+func healthStatus(sp *ShardProcess) string {
+	switch sp.AuthProbe {
+	case "ok":
+		return "healthy"
+	case "":
+		return "starting"
+	default:
+		return statusAuthFailed
+	}
+}
+
+// isCurrent reports whether sp is still the live process for name.
+func (s *Supervisor) isCurrent(name string, sp *ShardProcess) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.shards[name] == sp
+}
+
+// setAuthProbe records the probe outcome, and flips the shard to the loud
+// auth-failed status when the probe failed. The lock is released before the
+// status file is written: WriteStatusFile takes its own RLock, so writing
+// under s.mu would deadlock (the pre-R-03 writeStatusFileLocked required the
+// caller to hold the lock; the post-refactor WriteStatusFile does not).
+func (s *Supervisor) setAuthProbe(name string, sp *ShardProcess, probe string) {
+	s.mu.Lock()
+	if s.shards[name] != sp {
+		s.mu.Unlock()
+		return
+	}
+	sp.AuthProbe = probe
+	if probe != "ok" {
+		sp.Status = statusAuthFailed
+	}
+	s.mu.Unlock()
+	s.WriteStatusFile()
+}
+
+func (s *Supervisor) bindHost() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.Listener.BindHost
+}
+
+func (s *Supervisor) healthPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.Listener.HealthPath
+}
+
+// firstLine trims a probe's output to something worth putting in a log line.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 300 {
+		s = s[:300] + "…"
+	}
+	return s
 }
 
 // drainLog copies a child's output to the daemon log, prefixing each line so
@@ -875,12 +1030,20 @@ func (s *Supervisor) checkAll(ctx context.Context) {
 		}
 		sp.lastCheck = now
 		if results[i] {
-			sp.Status = "healthy"
-			// A healthy response clears the whole failure streak, not just
-			// the backoff (R-02).
-			sp.Restarts = 0
-			sp.backoff = initialBackoff
-			sp.lastUnhealthy = time.Time{}
+			// The port answers, but that is not proof the shard serves.
+			// Only a passed auth probe makes it "healthy": until the probe
+			// returns, status stays "starting" (no attach string), and a
+			// failed probe parks the shard in "auth-failed" — never the
+			// restart path below, since a restart cannot repair an engine
+			// that refuses its own token.
+			st := healthStatus(sp)
+			sp.Status = st
+			if st == "healthy" {
+				// A healthy response clears the whole failure streak (R-02).
+				sp.Restarts = 0
+				sp.backoff = initialBackoff
+				sp.lastUnhealthy = time.Time{}
+			}
 			continue
 		}
 
@@ -995,6 +1158,18 @@ func (s *Supervisor) AttachSQL() string {
 		}
 	}
 	return sql
+}
+
+// randInt returns a uniform random int in [0, n).
+func randInt(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0
+	}
+	return int(v.Int64())
 }
 
 // randomToken returns n cryptographically random characters from a

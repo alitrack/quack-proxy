@@ -193,6 +193,9 @@ type shardJSON struct {
 	Token           string `json:"token,omitempty"`
 	Database        string `json:"database"`
 	LastHealthCheck string `json:"last_health_check,omitempty"`
+	// AuthProbe carries the client round-trip result so `status` shows why
+	// a listening shard is still not serving.
+	AuthProbe string `json:"auth_probe,omitempty"`
 }
 
 // buildStatus maps the on-disk status file to the CLI's output shape. Tokens
@@ -210,6 +213,7 @@ func buildStatus(sf *supervisor.StatusFile, showTokens bool) statusJSON {
 			Restarts:        r.Restarts,
 			Database:        r.Database,
 			LastHealthCheck: r.LastCheck,
+			AuthProbe:       r.AuthProbe,
 		}
 		if showTokens {
 			sj.Token = r.Token

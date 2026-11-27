@@ -55,6 +55,9 @@ func TestGate0HealthyResetsRestartBudget(t *testing.T) {
 		Restarts:  maxRestarts - 1,
 		backoff:   16 * time.Second,
 		lastStart: time.Now().Add(-time.Hour),
+		// The auth probe has already passed: only then may the shard be
+		// reported healthy again (a passed probe is part of healthy now).
+		AuthProbe: "ok",
 	})
 
 	sup.checkAll(context.Background())

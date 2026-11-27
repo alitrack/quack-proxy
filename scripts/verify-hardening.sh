@@ -167,31 +167,38 @@ grep -qi "cannot find user id" "$WORK/bad-user.log" || {
   fail "negative control failed for an unexpected reason"; }
 echo "HARDENING_UNPROVISIONED_REJECTED=1 (why the option is opt-in)"
 
-# ---- negative control B: unhardened config warns about running as root ------
-# HAProxy >= 3.x emits this at STARTUP while `haproxy -c -f` still returns 0.
-# Older distro packages (e.g. 2.8) may word it differently or not at all;
-# gate on the major version so the gate stays honest rather than being skipped
-# silently.
-HAS_ROOT_WARNING=0
+# ---- negative control B: the UNhardened config really keeps root ------------
+# The old control grepped HAProxy's own "started as root without any chroot"
+# warning. That wording does not exist in HAProxy 3.x (checked against the
+# v3.0/v3.1 trees), so on a >=3 host the control failed for a reason that has
+# nothing to do with our config. Assert the property directly instead: a plain
+# config started as root must still be running as root, which is exactly what
+# proxy.hardened exists to prevent. This is version-independent and stronger
+# than reading a log line.
 "$HAPROXY_BIN" -db -f "$WORK/plain.cfg" > "$WORK/plain.log" 2>&1 &
-HPID=$!
+PLAIN_PID=$!
 sleep 1.2
-kill "$HPID" 2>/dev/null || true
-wait "$HPID" 2>/dev/null || true
-HPID=""
-if grep -qi "started as root without any" "$WORK/plain.log" &&
-   grep -qi "does not make use of" "$WORK/plain.log"; then
-  HAS_ROOT_WARNING=1
-fi
-HP_MAJOR="$(printf '%s' "$HP_VERSION" | sed -n 's/.*version \([0-9][0-9]*\)\..*/\1/p')"
-if [[ "$HP_MAJOR" -ge 3 ]] 2>/dev/null; then
-  [[ "$HAS_ROOT_WARNING" -eq 1 ]] || {
-    cat "$WORK/plain.log" >&2
-    fail "HAProxy >= 3 did not warn about the unhardened root config — negative control is blind"; }
-  echo "HARDENING_NEGATIVE_CONTROL_OK=1 (plain config warns about root/chroot/user)"
+if kill -0 "$PLAIN_PID" 2>/dev/null; then
+  PLAIN_UID="$(awk '/^Uid:/{print $2}' "/proc/$PLAIN_PID/status" 2>/dev/null)"
+  PLAIN_ROOT="$(readlink "/proc/$PLAIN_PID/root" 2>/dev/null)"
 else
-  echo "HARDENING_ROOT_WARNING_CONTROL_SKIPPED=1 (HAProxy major=$HP_MAJOR; warning is a >=3.x behaviour)"
+  PLAIN_UID=""
+  PLAIN_ROOT=""
 fi
+kill "$PLAIN_PID" 2>/dev/null || true
+wait "$PLAIN_PID" 2>/dev/null || true
+PLAIN_PID=""
+[[ -n "$PLAIN_UID" ]] || {
+  cat "$WORK/plain.log" >&2
+  fail "unhardened config did not start, so the 'keeps root' control is vacuous"; }
+[[ "$PLAIN_UID" == "0" ]] || \
+  fail "unhardened config dropped root by itself (uid=$PLAIN_UID); proxy.hardened proves nothing"
+[[ "$PLAIN_ROOT" == "/" ]] || \
+  fail "unhardened config chrooted by itself (root=$PLAIN_ROOT); proxy.hardened proves nothing"
+if grep -qiE "started as root without any|does not make use of" "$WORK/plain.log"; then
+  log "engine also warned about the unhardened root config (informational, wording varies by version)"
+fi
+echo "HARDENING_NEGATIVE_CONTROL_OK=1 (plain config really runs as uid 0, unchrooted)"
 
 # ---- positive: hardened config really drops privileges and forwards ---------
 log "starting hardened HAProxy and checking privilege drop + real forwarding"

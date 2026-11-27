@@ -85,6 +85,9 @@ log()  { echo "==> $*"; }
 
 CLEAN_WORK=0
 if [[ -z "$WORK" ]]; then WORK="$(mktemp -d)"; CLEAN_WORK=1; else mkdir -p "$WORK"; fi
+# Same reason as in verify-plaintext.sh: images that run as a non-root user
+# (the official haproxy image) cannot read a 0700 mktemp bind mount.
+chmod 755 "$WORK"
 # Git Bash: mktemp -d may return a MIXED path such as
 # 'C:\Users\DECISI~1\AppData\Local\Temp/tmp.XXXX'. Normalise it once to a
 # POSIX form for shell file operations, keep a Windows form for docker -v,
@@ -215,10 +218,15 @@ echo "GEN_PROXY_MULTI_SHARD_REJECTED=1"
 # Negative control 2: the vendor parser must reject a broken file, so a
 # no-op validator cannot make the config check pass silently.
 { cat "$WORK/haproxy.cfg"; echo "definitely-not-a-valid-directive"; } > "$WORK/broken.cfg"
-docker run --rm -v "$VOL:/work:ro" "$NODE_IMAGE" haproxy -c -f /work/broken.cfg \
+chmod 644 "$WORK"/*.cfg 2>/dev/null || true
+docker run --rm --user root -v "$VOL:/work:ro" "$NODE_IMAGE" haproxy -c -f /work/broken.cfg \
   > "$WORK/broken.log" 2>&1 && fail "haproxy accepted a broken config (validator is a no-op)"
+if grep -qiE "permission denied|cannot open" "$WORK/broken.log"; then
+  cat "$WORK/broken.log" >&2
+  fail "haproxy could not read the mounted config; the validator control is void"
+fi
 log "haproxy -c -f (positive)"
-docker run --rm -v "$VOL:/work:ro" "$NODE_IMAGE" haproxy -c -f /work/haproxy.cfg \
+docker run --rm --user root -v "$VOL:/work:ro" "$NODE_IMAGE" haproxy -c -f /work/haproxy.cfg \
   > "$WORK/haproxy-check.log" 2>&1 || { cat "$WORK/haproxy-check.log" >&2; fail "haproxy rejected the generated config"; }
 echo "HAPROXY_CONFIG_VALID=1"
 

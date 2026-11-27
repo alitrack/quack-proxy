@@ -26,7 +26,10 @@ type GlobalConfig struct {
 	// DuckDBBin overrides the duckdb CLI binary used for shards.
 	// Pin a known-good version: some alphas have broken quack token auth
 	// (verified 2026-11-09: v2.0.0-alpha39998 rejects even the correct
-	// server token; 2.0.0-alpha48730 works).
+	// server token; 2.0.0-alpha48730 works; 2026-11-27: v2.0.0 and v2.0.1
+	// releases both work). An auth-broken engine still serves /health, so
+	// a shard built on one is caught by the post-start auth probe and
+	// parked in "auth-failed" rather than reported healthy.
 	DuckDBBin string `yaml:"duckdb_bin"`
 	// AllowUnsignedExtensions re-enables DuckDB's -unsigned flag. It is off
 	// by default: an unsigned extension can load arbitrary native code, so

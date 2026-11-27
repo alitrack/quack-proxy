@@ -141,6 +141,13 @@ exec "$QUACK_STUB_BIN" -test.run='^TestHelperProcess$' -test.timeout=5m
 	}
 	waitEndpoint(t, port, true, 15*time.Second)
 
+	// The stub engine cannot answer a real quack_query round-trip, so the
+	// background probe cannot pass here. Simulate a passed probe (what the
+	// daemon sees with a real engine) before judging the health decision.
+	sup.mu.Lock()
+	sup.shards["it"].AuthProbe = "ok"
+	sup.mu.Unlock()
+
 	sup.checkAll(context.Background())
 	if got := sup.Status()[0].Status; got != "healthy" {
 		t.Fatalf("status after a real healthy probe = %q, want healthy", got)
