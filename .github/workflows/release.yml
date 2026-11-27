@@ -29,10 +29,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        - { os: linux,   arch: amd64 }
-        - { os: linux,   arch: arm64 }
-        - { os: darwin,  arch: amd64 }
-        - { os: darwin,  arch: arm64 }
         # r9 (R-18): Windows artifacts are NO LONGER PUBLISHED. PRD §8 has
         # always listed Windows as a non-goal, but we kept shipping a signed
         # .exe whose `version` worked while `start` could not host shards.
@@ -40,6 +36,14 @@ jobs:
         # check, and the required `windows-runtime-guard` job proves the
         # binary now refuses to start with an actionable error. Do not
         # re-add this artifact without a POSIX-free shard launcher.
+        #
+        # `include:` is required: a bare sequence directly under `matrix:` is
+        # not a valid GitHub Actions matrix mapping (upstream release fixes).
+        include:
+          - { os: linux,   arch: amd64 }
+          - { os: linux,   arch: arm64 }
+          - { os: darwin,  arch: amd64 }
+          - { os: darwin,  arch: arm64 }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -76,8 +80,8 @@ jobs:
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-dist
-          path: "quack-proxy-${{ GITHUB_REF_NAME }}-${{ matrix.os }}-${{ matrix.arch }}.*"
+          name: release-dist-${{ matrix.os }}-${{ matrix.arch }}
+          path: "quack-proxy-${{ github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}.*"
 
   publish:
     name: publish release
@@ -89,8 +93,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: release-dist
           path: dist
+          pattern: release-dist-*
+          merge-multiple: true
 
       - name: Checksums
         working-directory: dist
@@ -112,6 +117,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         working-directory: dist
         run: |
           # --generate-notes summarizes the commits since the previous tag,
@@ -119,5 +125,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            --files quack-proxy-* --files SHA256SUMS \
-            --files SHA256SUMS.sig --files SHA256SUMS.pem
+            quack-proxy-* SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem

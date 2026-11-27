@@ -27,6 +27,31 @@ quack-proxy does all of this with a single YAML and a single binary.
 
 ---
 
+## Where It Sits
+
+DuckLake's own manifesto deliberately leaves out the serving layer — concurrent
+users, authentication, authorization, and connection routing. Several projects
+now fill that gap; quack-proxy occupies the **minimal** end of it:
+
+| | [QoD](https://github.com/starlake-ai/qod) | [azure-ducklake-quack](https://github.com/MiguelElGallo/azure-ducklake-quack) | quack-proxy |
+|---|---|---|---|
+| Form | Python gateway + control-plane Postgres | Rust gateway, Azure-only (Easy Auth / Entra / Bicep) | **Go single binary, no external services** |
+| Auth | Pluggable DB / JWT / OIDC / SCIM | Azure Entra groups only | Engine-side hooks (`init_sql` → any authn/authz you can express in SQL) |
+| RBAC | Table/row/column, enforced on the bound plan, always-on | 2 connection roles (reader/writer) | Your policy, in the engine — e.g. [duckdb-luajit](https://github.com/alitrack/duckdb-luajit) RBAC with default-deny |
+| Target | Multi-tenant warehouse platform | Azure-native deployment | Minimal Quack service / shard supervisor |
+
+If you need multi-tenant billing, BI-tool JDBC access, or agent branch-and-merge
+workflows, use QoD. If you need one static binary supervising a handful of
+DuckDB files with auth enforced *inside the engine* rather than by a proxy-side
+regex, quack-proxy is that.
+
+> Proxy-side SQL filtering is bypassable (DuckDB's own security notes call out
+> `WITH x AS (SELECT 1) INSERT ...` style bypasses against text matching).
+> Engine-side hooks judge every statement the server actually executes, which
+> is why quack-proxy ships RBAC as `init_sql` instead of a built-in ACL.
+
+---
+
 ## Quick Start
 
 ### One-Click (No Go install needed)
@@ -328,6 +353,35 @@ Verified rules (2026-11-09, DuckDB 2.0.0 stable engine):
   macro is not cast to BOOLEAN (a rewrite hook, not just a gate).
 - Lua policy bodies must be valid Lua — an early compile failure makes every
   token fail with `Authentication failed`.
+
+### RBAC v2: scoped tokens + persistent audit (`examples/rbac2-init.sql`)
+
+Built on the same hook mechanism, v2 adds what a multi-user shard actually
+needs. E2E 13/13 PASS (`examples/rbac2-e2e.py`, 2026-11-16):
+
+- **Scoped tokens** — each token carries a verb ceiling (`RO`/`RW`): an `RO`
+  token cannot write even where its role holds write grants. `max_rows` and
+  `stmt_timeout_ms` fields are reserved on the token record.
+- **Write-bypass classification** — `WITH x AS (...) INSERT ...` shapes (the
+  bypass DuckDB's own security notes flag against text matching) are
+  classified as writes and stopped by the ceiling.
+- **Fail-closed on unclassified statements** — `SET`, `CALL`, `PRAGMA`, …
+  are denied unless explicitly classified.
+- **Persistent audit with protected readout** — every authn/authz decision is
+  written to an `rbac_audit` table (best-effort, pcall-guarded) and to an
+  in-memory ring (4096) that never blocks the hook. The audit table itself is
+  denied to every wire token — reading it would leak other users' queries.
+  Operators read it from the shard host directly:
+  `SELECT * FROM rbac_audit ORDER BY seq DESC LIMIT 50;`
+- **Unknown-table default-deny** — a query naming any table outside the grant
+  list is denied (the table need not exist).
+
+```yaml
+shards:
+  - name: mimic
+    database: /data/mimic.duckdb
+    init_sql_file: /etc/quack-proxy/rbac2-init.sql   # v2 example
+```
 
 ---
 
