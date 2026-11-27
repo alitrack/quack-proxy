@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/alitrack/quack-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/alitrack/quack-proxy/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev)
-[![DuckDB](https://img.shields.io/badge/DuckDB-1.5.2%20–%202.0.1-FFF000?logo=duckdb)](https://duckdb.org)
+[![DuckDB](https://img.shields.io/badge/DuckDB-1.5.2%20%E2%80%93%202.0.1-FFF000?style=flat&logo=duckdb)](https://duckdb.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built by Hermes](https://img.shields.io/badge/built%20by-Hermes%20Agent-8A2BE2)](https://hermes-agent.nousresearch.com)
 

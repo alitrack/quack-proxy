@@ -2,6 +2,47 @@
 
 本文件记录可影响使用者的行为变更。整改台账见 `docs/REMEDIATION.md`，边界见 `docs/SCOPE.md`。
 
+## Unreleased — auth probe (2026-11-27, PR #1)
+
+**结论先行：端口在听 ≠ 分片在服务。** 此前健康检查只探端口与问候串。`duckdb_bin` 落到
+quack 认证损坏的引擎（`v2.0.0-alpha39998`）时，分片照常报 `healthy` 并发布 attach 串，但每个
+客户端 ATTACH 都 `Authentication failed`——失败是静默的。现在 `healthy` 以「分片接受自己的
+token 并能回答一条查询」为前提。
+
+### Added
+
+- 状态文件与 `status` 输出新增 `auth_probe` 字段（`ok` / `failed: <原因>`）；新状态 `auth-failed`。
+- 认证探针：daemon 用 `duckdb_bin -unsigned -c` 作为**客户端**，以分片自身 token 跑
+  `SELECT <随机 marker> AS auth_probe`（marker 每次探针随机，回显或陈旧输出不能造成假 OK）；
+  3 次尝试、4s 间隔、单次 15s 超时。
+- 5 个探针单测（echo / refuse / silent 桩引擎），经变异验证（决策逻辑回退成旧语义时测试必 FAIL）。
+
+### Changed
+
+- `healthy` = 端口应答 **且** 探针通过。探针未决 → `starting`，不发 attach 串；探针失败 →
+  `auth-failed`，不发 attach 串、ERROR 点名 `duckdb_bin`、**不重启**（重启修不好引擎二进制，
+  只会刷掉重启预算）。探针挂在 `launch()` 上，每次重启都重新自检。
+- 既有门禁测试（gate0 / integration）显式预置探针通过，而不是放宽 `healthy` 语义。
+- README 状态表与版本徽章同步；经 quack-proxy 实测可托管的引擎：`v2.0.0`、`v2.0.1`、
+  `v2.0.0-alpha43355`、`v2.0.0-alpha48730`；仅 `v2.0.0-alpha39998` 认证坏。
+
+### 边界（不得读宽）
+
+- 探针证明的是「分片接受自己的 token 并能回答一条常量查询」，不证明数据面、TLS 或 RBAC 钩子正确。
+- 坏引擎不会被修复，只会被标红；更换 `duckdb_bin` 是运维动作。
+
+### Verification
+
+- `go test ./... -count=1` 91/91；`gofmt -l .` 空；`go vet ./...` 通过。
+- E2E 双档（合并到 main 后复跑）：alpha39998 → `auth-failed` + 空 attach + ERROR；
+  v2.0.1 → `healthy` + `auth_probe: ok` + attach 发布。
+- 异体复审：sigil PASS（抓出探针未决窗口仍发 attach、版本列表不一致，均已修）；pi 空转无产出，不计入。
+- CI 14/14。同一批顺带修了四个演练 job 的可移植性问题（此前在 main 上同样失败）：runner 的
+  `systemctl is-system-running` 永远 `starting`（改判 PID 1 是 systemd）；官方 haproxy 镜像以非 root
+  运行、读不了 0700 的 `mktemp -d` 挂载（目录 755、配置 644、校验调用 `--user root`，permission
+  类错误单列）；HAProxy 3.x 没有「started as root without any chroot」警告字串（负对照改为直接
+  断言未加固配置仍以 uid 0 运行）；`drill-stub` 补齐探针的客户端角色。
+
 ## Unreleased — remediation r17 (2026-11-19)
 
 **结论先行：这不是从「仍未做」清单里翻出的第八/第九种形态，而是一个此前没被看见的
